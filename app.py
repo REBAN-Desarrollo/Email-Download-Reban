@@ -64,7 +64,22 @@ def validate_imap_date(date_str):
     return True
 
 GMAIL_DAILY_LIMIT = 2500 * 1024 * 1024  # 2500 MB
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 QUOTA_FILE = os.path.join(os.path.expanduser("~"), ".gmail_downloader_quota.json")
+SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
+
+def load_settings():
+    """Carga los últimos settings guardados."""
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_settings(data):
+    """Guarda settings a disco."""
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def load_daily_quota():
     """Carga la cuota diaria. Resetea si es un día nuevo."""
@@ -101,6 +116,7 @@ class GmailDownloaderApp:
         self.daily_bytes = load_daily_quota()
 
         self.create_widgets()
+        self._load_settings()
 
         if self.daily_bytes > 0:
             pct = self.daily_bytes / GMAIL_DAILY_LIMIT * 100
@@ -239,6 +255,52 @@ class GmailDownloaderApp:
         iid = self.tree.insert("", "end", values=(eid.decode(), fecha, remitente, asunto, size_str))
         self.size_cache[iid] = size_bytes
 
+    def _load_settings(self):
+        """Restaura los últimos settings guardados en los campos."""
+        s = load_settings()
+        if not s:
+            return
+        # Credenciales
+        if s.get("email"):
+            self.email_entry.insert(0, s["email"])
+        if s.get("password"):
+            try:
+                self.pass_entry.insert(0, base64.b64decode(s["password"]).decode("utf-8"))
+            except Exception:
+                pass
+        # Filtros — limpiar defaults y poner los guardados
+        for field, key in [(self.sender_entry, "sender"), (self.since_entry, "since"),
+                           (self.before_entry, "before"), (self.subject_entry, "subject"),
+                           (self.keyword_entry, "keyword"), (self.format_entry, "format")]:
+            if key in s:
+                field.delete(0, tk.END)
+                field.insert(0, s[key])
+        # Carpeta destino
+        if s.get("output_dir"):
+            self.output_dir = s["output_dir"]
+            self.folder_label.config(text=self.output_dir)
+        # Checkboxes
+        if "download_body" in s:
+            self.download_body.set(s["download_body"])
+        if "download_attachments" in s:
+            self.download_attachments.set(s["download_attachments"])
+
+    def _save_settings(self):
+        """Guarda el estado actual de todos los campos."""
+        save_settings({
+            "email": self.email_entry.get().strip(),
+            "password": base64.b64encode(self.pass_entry.get().strip().encode("utf-8")).decode("ascii"),
+            "sender": self.sender_entry.get().strip(),
+            "since": self.since_entry.get().strip(),
+            "before": self.before_entry.get().strip(),
+            "subject": self.subject_entry.get().strip(),
+            "keyword": self.keyword_entry.get().strip(),
+            "format": self.format_entry.get().strip(),
+            "output_dir": self.output_dir,
+            "download_body": self.download_body.get(),
+            "download_attachments": self.download_attachments.get(),
+        })
+
     def select_all(self):
         children = self.tree.get_children()
         if children:
@@ -310,6 +372,7 @@ class GmailDownloaderApp:
             self.root.after(0, self.btn_test.config, {"state": "normal"})
 
     def start_search(self):
+        self._save_settings()
         self.btn_search.config(state="disabled")
         self.tree.delete(*self.tree.get_children())
         self.size_cache.clear()
@@ -396,6 +459,7 @@ class GmailDownloaderApp:
             self._close_imap()
 
     def start_download(self):
+        self._save_settings()
         selected_items = self.tree.selection()
         if not selected_items:
             messagebox.showwarning("Atención", "Debes seleccionar al menos un correo de la tabla.")
