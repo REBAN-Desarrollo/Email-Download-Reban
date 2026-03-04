@@ -22,3 +22,9 @@ python_installer.exe
 
 # Gemini
 .gemini/
+
+# Playwright browsers (portable, ~260MB)
+browsers/
+
+# Testing
+testing/
