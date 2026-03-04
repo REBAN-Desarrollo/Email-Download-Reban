@@ -44,8 +44,6 @@ def find_ghostscript():
             return matches[0]
     return None
 
-GS_PATH = find_ghostscript()
-
 # Playwright portable: buscar Chromium en carpeta local del proyecto
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "browsers"
@@ -334,8 +332,6 @@ class GmailDownloaderApp:
         # Botón para comprimir PDFs existentes
         self.btn_compress = ttk.Button(frame_action, text="Comprimir PDFs en Carpeta", command=self.start_compress_pdfs)
         self.btn_compress.pack(side="right", padx=5)
-        if not GS_PATH:
-            self.btn_compress.config(state="disabled")
 
         # --- Log Text ---
         self.log_text = tk.Text(self.root, height=8, state='disabled', bg="#f4f4f4")
@@ -575,8 +571,9 @@ class GmailDownloaderApp:
                      margin={"top": "15mm", "bottom": "15mm",
                              "left": "10mm", "right": "10mm"})
             # Auto-comprimir el PDF recién generado
-            if GS_PATH:
-                self._compress_single_pdf(output_filename)
+            gs = find_ghostscript()
+            if gs:
+                self._compress_single_pdf(output_filename, gs)
             return True
         except Exception as e:
             self.log(f"Error convirtiendo PDF: {e}")
@@ -751,10 +748,12 @@ class GmailDownloaderApp:
             self.root.after(0, self.progress.pack_forget)
             self._close_imap()
 
-    def _compress_single_pdf(self, pdf_path):
+    def _compress_single_pdf(self, pdf_path, gs_path=None):
         """Comprime un PDF con Ghostscript (calidad /printer, 300 DPI).
         Retorna (original_bytes, compressed_bytes, error_str)."""
-        if not GS_PATH:
+        if not gs_path:
+            gs_path = find_ghostscript()
+        if not gs_path:
             return 0, 0, "Ghostscript no encontrado"
         try:
             original_size = os.path.getsize(pdf_path)
@@ -762,7 +761,7 @@ class GmailDownloaderApp:
 
             result = subprocess.run(
                 [
-                    GS_PATH,
+                    gs_path,
                     "-sDEVICE=pdfwrite",
                     "-dCompatibilityLevel=1.4",
                     "-dPDFSETTINGS=/printer",
@@ -798,7 +797,8 @@ class GmailDownloaderApp:
 
     def start_compress_pdfs(self):
         """Inicia la compresión de PDFs en hilo separado."""
-        if not GS_PATH:
+        gs = find_ghostscript()
+        if not gs:
             messagebox.showwarning(
                 "Ghostscript no encontrado",
                 "Instala Ghostscript desde:\n"
