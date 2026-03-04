@@ -427,7 +427,7 @@ class GmailDownloaderApp:
             raise ValueError("Falta el correo o el App Password.")
 
         self.log("Conectando a Gmail...")
-        self.mail_conn = imaplib.IMAP4_SSL(self.imap_server, timeout=30)
+        self.mail_conn = imaplib.IMAP4_SSL(self.imap_server, timeout=120)
         self.mail_conn.login(email_addr, pwd)
         self.mail_conn.select("INBOX")
         self.log("Conectado exitosamente.")
@@ -608,8 +608,35 @@ class GmailDownloaderApp:
                 eid_str, fecha, remitente, asunto = item[0], item[1], item[2], item[3]
                 self.log(f"Descargando [{idx}/{len(items_data)}]: {asunto[:30]}...")
 
-                _, msg_data = self.mail_conn.fetch(eid_str.encode(), "(BODY.PEEK[])")
-                raw_email = msg_data[0][1]
+                # Fetch con auto-reconexión (hasta 3 intentos)
+                raw_email = None
+                for attempt in range(3):
+                    try:
+                        _, msg_data = self.mail_conn.fetch(
+                            eid_str.encode(), "(BODY.PEEK[])"
+                        )
+                        raw_email = msg_data[0][1]
+                        break
+                    except Exception as fetch_err:
+                        if attempt < 2:
+                            self.log(
+                                f"  [RECONECTANDO] "
+                                f"Intento {attempt + 2}/3..."
+                            )
+                            try:
+                                self._close_imap()
+                                self.connect_imap()
+                            except Exception:
+                                pass
+                        else:
+                            self.log(
+                                f"  [ERROR] No se pudo "
+                                f"descargar: {fetch_err}"
+                            )
+
+                if raw_email is None:
+                    continue  # Saltar este correo
+
                 batch_bytes += len(raw_email)
                 msg = email.message_from_bytes(raw_email)
 
