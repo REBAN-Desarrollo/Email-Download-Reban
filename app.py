@@ -8,13 +8,22 @@ from email.utils import parsedate_to_datetime
 import os
 import re
 import html  # para escapar HTML en PDFs
+import base64
 
 try:
-    from xhtml2pdf import pisa
-    XHTML2PDF_AVAILABLE = True
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
 except ImportError:
-    XHTML2PDF_AVAILABLE = False
-    pisa = None
+    PLAYWRIGHT_AVAILABLE = False
+
+def format_size(size_bytes):
+    """Formatea bytes a cadena legible (B, KB, MB)"""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.2f} MB"
 
 def clean_filename(name):
     """Limpia caracteres inválidos para nombres de archivos en Windows"""
@@ -60,10 +69,15 @@ class GmailDownloaderApp:
         self.mail_conn = None
         self.output_dir = os.path.join(os.path.expanduser("~"), "Descargas_Correos")
 
+        self.download_body = tk.BooleanVar(value=True)
+        self.download_attachments = tk.BooleanVar(value=True)
+        self.size_cache = {}  # iid → bytes raw para cálculo de tamaño
+
         self.create_widgets()
 
-        if not XHTML2PDF_AVAILABLE:
-            self.log("[AVISO] xhtml2pdf no está instalado. No se podrán generar PDFs.")
+        if not PLAYWRIGHT_AVAILABLE:
+            self.log("[AVISO] playwright no está instalado. No se podrán generar PDFs.")
+            self.log("  Instalar: pip install playwright && playwright install chromium")
 
     def log(self, message):
         """Añade un mensaje al log en la interfaz gráfica (thread-safe)"""
@@ -127,7 +141,16 @@ class GmailDownloaderApp:
         frame_results = ttk.LabelFrame(self.root, text="Correos Encontrados (Usa Ctrl o Shift para multi-selección)")
         frame_results.pack(fill="both", expand=True, padx=10, pady=5)
 
-        columns = ("id", "fecha", "remitente", "asunto")
+        # Toolbar: Seleccionar/Deseleccionar + Contador
+        frame_toolbar = tk.Frame(frame_results)
+        frame_toolbar.pack(fill="x", padx=5, pady=(5, 0))
+
+        ttk.Button(frame_toolbar, text="Seleccionar Todos", command=self.select_all).pack(side="left", padx=2)
+        ttk.Button(frame_toolbar, text="Deseleccionar", command=self.deselect_all).pack(side="left", padx=2)
+        self.selection_label = ttk.Label(frame_toolbar, text="0 de 0 seleccionados")
+        self.selection_label.pack(side="right", padx=5)
+
+        columns = ("id", "fecha", "remitente", "asunto", "tamano")
         self.tree = ttk.Treeview(frame_results, columns=columns, show="headings", selectmode="extended")
         self.tree.heading("id", text="ID")
         self.tree.column("id", width=50, anchor="center")
@@ -136,12 +159,19 @@ class GmailDownloaderApp:
         self.tree.heading("remitente", text="Remitente")
         self.tree.column("remitente", width=200)
         self.tree.heading("asunto", text="Asunto")
-        self.tree.column("asunto", width=450)
+        self.tree.column("asunto", width=350)
+        self.tree.heading("tamano", text="Tamaño")
+        self.tree.column("tamano", width=80, anchor="center")
 
         scrollbar = ttk.Scrollbar(frame_results, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscroll=scrollbar.set)
         self.tree.pack(side="left", fill="both", expand=True, padx=(5,0), pady=5)
         scrollbar.pack(side="right", fill="y", padx=(0,5), pady=5)
+
+        self.tree.bind("<<TreeviewSelect>>", self.update_selection_count)
+
+        # --- Barra de Progreso ---
+        self.progress = ttk.Progressbar(self.root, mode="determinate")
 
         # --- Frame de Formato de Salida ---
         frame_format = ttk.LabelFrame(self.root, text="Formato de Salida y Descarga")
@@ -164,12 +194,37 @@ class GmailDownloaderApp:
         self.folder_label = ttk.Label(frame_action, text=self.output_dir, foreground="blue")
         self.folder_label.pack(side="left", padx=5)
 
+        ttk.Checkbutton(frame_action, text="Cuerpo (PDF)", variable=self.download_body).pack(side="left", padx=5)
+        ttk.Checkbutton(frame_action, text="Adjuntos", variable=self.download_attachments).pack(side="left", padx=5)
+
         self.btn_download = ttk.Button(frame_action, text="Descargar Seleccionados (Batch)", command=self.start_download)
         self.btn_download.pack(side="right", padx=5)
 
         # --- Log Text ---
         self.log_text = tk.Text(self.root, height=8, state='disabled', bg="#f4f4f4")
         self.log_text.pack(fill="x", padx=10, pady=(0,10))
+
+    def _insert_email_row(self, eid, fecha, remitente, asunto, size_str, size_bytes):
+        iid = self.tree.insert("", "end", values=(eid.decode(), fecha, remitente, asunto, size_str))
+        self.size_cache[iid] = size_bytes
+
+    def select_all(self):
+        children = self.tree.get_children()
+        if children:
+            self.tree.selection_set(children)
+
+    def deselect_all(self):
+        self.tree.selection_remove(self.tree.get_children())
+
+    def update_selection_count(self, event=None):
+        total = len(self.tree.get_children())
+        selected_items = self.tree.selection()
+        selected = len(selected_items)
+
+        total_bytes = sum(self.size_cache.get(item, 0) for item in selected_items)
+
+        size_display = f" | {format_size(total_bytes)}" if selected > 0 and total_bytes > 0 else ""
+        self.selection_label.config(text=f"{selected} de {total} seleccionados{size_display}")
 
     def choose_folder(self):
         folder = filedialog.askdirectory(initialdir=self.output_dir)
@@ -226,6 +281,7 @@ class GmailDownloaderApp:
     def start_search(self):
         self.btn_search.config(state="disabled")
         self.tree.delete(*self.tree.get_children())
+        self.size_cache.clear()
         threading.Thread(target=self.search_emails, daemon=True).start()
 
     def search_emails(self):
@@ -268,14 +324,23 @@ class GmailDownloaderApp:
             self.log(f"Se encontraron {len(ids)} correos. Obteniendo previsualización...")
 
             for eid in ids:
-                # PEEK previene marcar los correos como leídos
-                _, msg_data = self.mail_conn.fetch(eid, "(BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT)])")
+                # PEEK previene marcar los correos como leídos y pedimos el tamaño total (RFC822.SIZE)
+                _, msg_data = self.mail_conn.fetch(eid, "(RFC822.SIZE BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT)])")
                 if not msg_data or msg_data[0] is None:
                     continue
 
                 # msg_data puede ser [(b'flags', b'header'), b')'] — tomar el primer elemento tupla
                 raw_part = msg_data[0]
+                size_bytes = 0
+                size_str = "Desconocido"
                 if isinstance(raw_part, tuple):
+                    # Extraer el tamaño del correo
+                    info_str = raw_part[0].decode("utf-8", errors="ignore")
+                    match = re.search(r"RFC822\.SIZE (\d+)", info_str, re.IGNORECASE)
+                    if match:
+                        size_bytes = int(match.group(1))
+                        size_str = format_size(size_bytes)
+
                     raw_header = raw_part[1]
                 else:
                     continue
@@ -290,7 +355,7 @@ class GmailDownloaderApp:
                 remitente = decode_str(msg.get("From", ""))
                 asunto = decode_str(msg.get("Subject", ""))
 
-                self.root.after(0, lambda e=eid, f=fecha_str, r=remitente, a=asunto: self.tree.insert("", "end", values=(e.decode(), f, r, a)))
+                self.root.after(0, lambda e=eid, f=fecha_str, r=remitente, a=asunto, s=size_str, sb=size_bytes: self._insert_email_row(e, f, r, a, s, sb))
 
             self.log("Búsqueda completada.")
         except Exception as e:
@@ -305,33 +370,55 @@ class GmailDownloaderApp:
             messagebox.showwarning("Atención", "Debes seleccionar al menos un correo de la tabla.")
             return
 
+        if not self.download_body.get() and not self.download_attachments.get():
+            messagebox.showwarning("Atención", "Debes marcar al menos una opción: Cuerpo (PDF) o Adjuntos.")
+            return
+
         items_data = [self.tree.item(item, "values") for item in selected_items]
         self.btn_download.config(state="disabled")
+
+        # Mostrar barra de progreso
+        self.progress.config(maximum=len(items_data), value=0)
+        self.progress.pack(fill="x", padx=10, pady=(0, 5))
+
         threading.Thread(target=self.download_emails, args=(items_data,), daemon=True).start()
 
-    def convert_html_to_pdf(self, source_html, output_filename):
-        if not XHTML2PDF_AVAILABLE:
-            self.log("  [AVISO] xhtml2pdf no instalado, PDF omitido")
-            return False
+    def convert_html_to_pdf(self, page, source_html, output_filename):
         try:
-            with open(output_filename, "wb") as result_file:
-                pisa_status = pisa.CreatePDF(source_html, dest=result_file)
-            return not pisa_status.err
+            page.set_content(source_html, wait_until="networkidle", timeout=15000)
+            page.pdf(path=output_filename, format="Letter",
+                     margin={"top": "15mm", "bottom": "15mm",
+                             "left": "10mm", "right": "10mm"})
+            return True
         except Exception as e:
             self.log(f"Error convirtiendo PDF: {e}")
             return False
 
     def download_emails(self, items_data):
+        want_body = self.download_body.get()
+        want_attachments = self.download_attachments.get()
+
+        pw_context = None
+        browser = None
+        page = None
+
         try:
             os.makedirs(self.output_dir, exist_ok=True)
             self.connect_imap()
+
+            # Abrir Playwright una sola vez para todo el batch
+            if want_body and PLAYWRIGHT_AVAILABLE:
+                self.log("Iniciando motor de renderizado PDF...")
+                pw_context = sync_playwright().start()
+                browser = pw_context.chromium.launch(headless=True)
+                page = browser.new_page()
 
             template = self.format_entry.get().strip()
             if not template:
                 template = "{date}_{subject}"
 
             for idx, item in enumerate(items_data, 1):
-                eid_str, fecha, remitente, asunto = item
+                eid_str, fecha, remitente, asunto = item[0], item[1], item[2], item[3]
                 self.log(f"Descargando [{idx}/{len(items_data)}]: {asunto[:30]}...")
 
                 _, msg_data = self.mail_conn.fetch(eid_str.encode(), "(BODY.PEEK[])")
@@ -345,8 +432,7 @@ class GmailDownloaderApp:
                 folder_name = folder_name.replace("{subject}", clean_filename(asunto))
                 folder_name = folder_name.replace("{id}", eid_str)
                 folder_name = clean_filename(folder_name)
-                # Prevenir path traversal
-                folder_name = folder_name.replace("..", "").replace("/", "").replace("\\", "")
+                folder_name = folder_name.replace("..", "")
 
                 if not folder_name:
                     folder_name = f"Email_{eid_str}"
@@ -362,6 +448,7 @@ class GmailDownloaderApp:
 
                 body_html = ""
                 body_text = ""
+                cid_map = {}  # Content-ID → data URI (para imágenes inline)
 
                 # Procesar partes del correo (Adjuntos y Cuerpo)
                 for part in msg.walk():
@@ -370,15 +457,26 @@ class GmailDownloaderApp:
 
                     # Descarga de Adjuntos
                     if "attachment" in cdispo or part.get_filename():
-                        fname = part.get_filename()
-                        if fname:
-                            fname_dec = decode_str(fname)
-                            safe_fname = clean_filename(fname_dec)
-                            filepath = os.path.join(folder_path, safe_fname)
-                            with open(filepath, "wb") as f:
-                                f.write(part.get_payload(decode=True))
-                            self.log(f"  Adjunto: {safe_fname}")
+                        if want_attachments:
+                            fname = part.get_filename()
+                            if fname:
+                                fname_dec = decode_str(fname)
+                                safe_fname = clean_filename(fname_dec)
+                                filepath = os.path.join(folder_path, safe_fname)
+                                with open(filepath, "wb") as f:
+                                    f.write(part.get_payload(decode=True))
+                                self.log(f"  Adjunto: {safe_fname}")
                         continue
+
+                    # Imágenes inline (Content-ID) → guardar como data URI para PDF
+                    if want_body and ctype.startswith("image/"):
+                        content_id = part.get("Content-ID", "")
+                        if content_id:
+                            cid = content_id.strip("<>")
+                            payload = part.get_payload(decode=True)
+                            if payload:
+                                b64 = base64.b64encode(payload).decode("ascii")
+                                cid_map[cid] = f"data:{ctype};base64,{b64}"
 
                     # Extracción de Texto para el PDF
                     if ctype == "text/html" and not body_html:
@@ -386,17 +484,23 @@ class GmailDownloaderApp:
                     elif ctype == "text/plain" and not body_text:
                         body_text = part.get_payload(decode=True).decode("utf-8", errors="ignore")
 
-                if not body_html and not body_text:
-                    final_html = "<p><em>Este correo no tiene contenido de texto.</em></p>"
-                else:
-                    final_html = body_html or f"<pre>{html.escape(body_text)}</pre>"
+                # Reemplazar referencias cid: en el HTML con data URIs
+                if body_html and cid_map:
+                    for cid, data_uri in cid_map.items():
+                        body_html = body_html.replace(f"cid:{cid}", data_uri)
 
-                # Escapar metadatos para prevenir inyección HTML en el PDF
-                safe_remitente = html.escape(remitente)
-                safe_asunto = html.escape(asunto)
-                safe_fecha = html.escape(fecha)
+                if want_body and page:
+                    if not body_html and not body_text:
+                        final_html = "<p><em>Este correo no tiene contenido de texto.</em></p>"
+                    else:
+                        final_html = body_html or f"<pre>{html.escape(body_text)}</pre>"
 
-                pdf_html = f"""
+                    # Escapar metadatos para prevenir inyección HTML en el PDF
+                    safe_remitente = html.escape(remitente)
+                    safe_asunto = html.escape(asunto)
+                    safe_fecha = html.escape(fecha)
+
+                    pdf_html = f"""
                 <html>
                 <head><meta charset="utf-8">
                 <style>
@@ -416,21 +520,42 @@ class GmailDownloaderApp:
                 </html>
                 """
 
-                pdf_path = os.path.join(folder_path, "Mensaje_Legible.pdf")
-                if self.convert_html_to_pdf(pdf_html, pdf_path):
-                    self.log("  PDF guardado en Mensaje_Legible.pdf")
-                else:
-                    self.log("  [AVISO] No se pudo generar el PDF")
+                    pdf_path = os.path.join(folder_path, "Mensaje_Legible.pdf")
+                    if self.convert_html_to_pdf(page, pdf_html, pdf_path):
+                        self.log("  PDF guardado en Mensaje_Legible.pdf")
+                    else:
+                        self.log("  [AVISO] No se pudo generar el PDF")
+                elif want_body and not PLAYWRIGHT_AVAILABLE:
+                    self.log("  [AVISO] playwright no instalado, PDF omitido")
+
+                # Actualizar barra de progreso
+                self.root.after(0, self.progress.config, {"value": idx})
 
             self.log("Descarga masiva completada exitosamente!")
-            self.root.after(0, messagebox.showinfo, "Éxito", f"Se han descargado {len(items_data)} correos exitosamente en:\n{self.output_dir}")
+            self.root.after(0, self._download_finished, len(items_data))
 
         except Exception as e:
             self.log(f"Error crítico durante descarga: {str(e)}")
             self.root.after(0, messagebox.showerror, "Error", f"Ocurrió un error:\n{str(e)}")
         finally:
+            # Cerrar Playwright
+            if browser:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+            if pw_context:
+                try:
+                    pw_context.stop()
+                except Exception:
+                    pass
             self.root.after(0, self.btn_download.config, {"state": "normal"})
+            self.root.after(0, self.progress.pack_forget)
             self._close_imap()
+
+    def _download_finished(self, count):
+        if messagebox.askyesno("Éxito", f"Se han descargado {count} correos exitosamente.\n¿Abrir carpeta de destino?"):
+            os.startfile(self.output_dir)
 
 if __name__ == "__main__":
     root = tk.Tk()
