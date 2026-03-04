@@ -3,6 +3,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 import imaplib
 import email
+import time
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
 import os
@@ -13,7 +14,7 @@ import base64
 import json
 import subprocess
 import glob
-from datetime import date
+from datetime import date, datetime
 
 def find_ghostscript():
     """Busca gswin64c.exe en rutas estándar de Windows.
@@ -190,6 +191,8 @@ class GmailDownloaderApp:
         self.download_attachments = tk.BooleanVar(value=True)
         self.size_cache = {}  # iid → bytes raw para cálculo de tamaño
         self.daily_bytes = load_daily_quota()
+        self._cancel_event = threading.Event()
+        self._log_file = None
 
         self.create_widgets()
         self._load_settings()
@@ -217,6 +220,14 @@ class GmailDownloaderApp:
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
         self.log_text.config(state='disabled')
+        # Escribir al archivo de log si está abierto
+        if self._log_file:
+            try:
+                ts = datetime.now().strftime("%H:%M:%S")
+                self._log_file.write(f"[{ts}] {message}\n")
+                self._log_file.flush()
+            except Exception:
+                pass
 
     def create_widgets(self):
         # --- Frame de Configuración de Cuenta ---
@@ -300,7 +311,14 @@ class GmailDownloaderApp:
         self.tree.bind("<<TreeviewSelect>>", self.update_selection_count)
 
         # --- Barra de Progreso ---
-        self.progress = ttk.Progressbar(self.root, mode="determinate")
+        self.progress_frame = tk.Frame(self.root)
+        self.progress = ttk.Progressbar(
+            self.progress_frame, mode="determinate"
+        )
+        self.progress.pack(fill="x", side="left", expand=True)
+        self.progress_label = ttk.Label(
+            self.progress_frame, text="", width=40
+        )
 
         # --- Frame de Formato de Salida ---
         frame_format = ttk.LabelFrame(self.root, text="Formato de Salida y Descarga")
@@ -328,6 +346,9 @@ class GmailDownloaderApp:
 
         self.btn_download = ttk.Button(frame_action, text="Descargar Seleccionados (Batch)", command=self.start_download)
         self.btn_download.pack(side="right", padx=5)
+
+        # Botón cancelar (oculto por defecto)
+        self.btn_cancel = ttk.Button(frame_action, text="Cancelar", command=self._cancel_download)
 
         # Botón para comprimir PDFs existentes
         self.btn_compress = ttk.Button(frame_action, text="Comprimir PDFs en Carpeta", command=self.start_compress_pdfs)
@@ -544,6 +565,12 @@ class GmailDownloaderApp:
             self.root.after(0, self.btn_search.config, {"state": "normal"})
             self._close_imap()
 
+    def _cancel_download(self):
+        """Señala cancelación de la descarga en progreso."""
+        self._cancel_event.set()
+        self.btn_cancel.config(state="disabled")
+        self.log("[CANCELANDO] Deteniendo después del correo actual...")
+
     def start_download(self):
         self._save_settings()
         selected_items = self.tree.selection()
@@ -556,11 +583,15 @@ class GmailDownloaderApp:
             return
 
         items_data = [self.tree.item(item, "values") for item in selected_items]
-        self.btn_download.config(state="disabled")
+        self._cancel_event.clear()
+        self.btn_download.pack_forget()
+        self.btn_cancel.pack(side="right", padx=5)
 
-        # Mostrar barra de progreso
+        # Mostrar barra de progreso con label
         self.progress.config(maximum=len(items_data), value=0)
-        self.progress.pack(fill="x", padx=10, pady=(0, 5))
+        self.progress_label.config(text="Iniciando...")
+        self.progress_label.pack(side="right", padx=5)
+        self.progress_frame.pack(fill="x", padx=10, pady=(0, 5))
 
         threading.Thread(target=self.download_emails, args=(items_data,), daemon=True).start()
 
@@ -579,6 +610,45 @@ class GmailDownloaderApp:
             self.log(f"Error convirtiendo PDF: {e}")
             return False
 
+    def _load_manifest(self):
+        """Carga el manifest de correos ya descargados."""
+        path = os.path.join(self.output_dir, "manifest.json")
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_manifest(self, manifest):
+        """Guarda el manifest de correos descargados."""
+        path = os.path.join(self.output_dir, "manifest.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    def _start_playwright(self):
+        """Inicia Playwright y retorna (context, browser, page)."""
+        self.log("Iniciando motor de renderizado PDF...")
+        ctx = sync_playwright().start()
+        br = ctx.chromium.launch(headless=True)
+        pg = br.new_page()
+        return ctx, br, pg
+
+    def _restart_playwright(self, pw_ctx, br):
+        """Cierra y reinicia Playwright."""
+        try:
+            if br:
+                br.close()
+        except Exception:
+            pass
+        try:
+            if pw_ctx:
+                pw_ctx.stop()
+        except Exception:
+            pass
+        return self._start_playwright()
+
     def download_emails(self, items_data):
         want_body = self.download_body.get()
         want_attachments = self.download_attachments.get()
@@ -587,26 +657,88 @@ class GmailDownloaderApp:
         browser = None
         page = None
 
+        # Abrir log a archivo
         try:
             os.makedirs(self.output_dir, exist_ok=True)
+            log_path = os.path.join(
+                self.output_dir, "download_log.txt"
+            )
+            self._log_file = open(
+                log_path, "a", encoding="utf-8"
+            )
+            self._log_file.write(
+                f"\n{'='*50}\n"
+                f"Sesión: {datetime.now():%Y-%m-%d %H:%M}\n"
+                f"{'='*50}\n"
+            )
+        except Exception:
+            self._log_file = None
+
+        try:
             self.connect_imap()
+
+            # Cargar manifest de duplicados
+            manifest = self._load_manifest()
 
             # Abrir Playwright una sola vez para todo el batch
             if want_body and PLAYWRIGHT_AVAILABLE:
-                self.log("Iniciando motor de renderizado PDF...")
-                pw_context = sync_playwright().start()
-                browser = pw_context.chromium.launch(headless=True)
-                page = browser.new_page()
+                pw_context, browser, page = (
+                    self._start_playwright()
+                )
 
             template = self.format_entry.get().strip()
             if not template:
                 template = "{date}_{subject}"
 
             batch_bytes = 0
+            skipped = 0
+            downloaded = 0
+            start_time = time.time()
+            total = len(items_data)
 
             for idx, item in enumerate(items_data, 1):
+                # Verificar cancelación
+                if self._cancel_event.is_set():
+                    self.log(
+                        f"[CANCELADO] {downloaded} de "
+                        f"{total} descargados."
+                    )
+                    break
+
                 eid_str, fecha, remitente, asunto = item[0], item[1], item[2], item[3]
-                self.log(f"Descargando [{idx}/{len(items_data)}]: {asunto[:30]}...")
+
+                # Detección de duplicados
+                if eid_str in manifest:
+                    skipped += 1
+                    self.log(
+                        f"  [{idx}/{total}] "
+                        f"[DUPLICADO] {asunto[:30]}..."
+                    )
+                    self.root.after(
+                        0, self.progress.config, {"value": idx}
+                    )
+                    continue
+
+                self.log(f"Descargando [{idx}/{total}]: {asunto[:30]}...")
+
+                # Actualizar ETA
+                elapsed = time.time() - start_time
+                if downloaded > 0:
+                    rate = downloaded / elapsed
+                    remaining = (total - idx) / rate
+                    mins = int(remaining // 60)
+                    secs = int(remaining % 60)
+                    eta_text = (
+                        f"[{idx}/{total}] "
+                        f"{idx*100//total}% — "
+                        f"~{mins}m {secs}s restante"
+                    )
+                else:
+                    eta_text = f"[{idx}/{total}] Calculando..."
+                self.root.after(
+                    0, self.progress_label.config,
+                    {"text": eta_text}
+                )
 
                 # Fetch con auto-reconexión (hasta 3 intentos)
                 raw_email = None
@@ -653,12 +785,6 @@ class GmailDownloaderApp:
                     folder_name = f"Email_{eid_str}"
 
                 folder_path = os.path.join(self.output_dir, folder_name)
-                # Evitar carpetas duplicadas: añadir sufijo incremental
-                base_path = folder_path
-                counter = 1
-                while os.path.exists(folder_path):
-                    folder_path = f"{base_path}_{counter}"
-                    counter += 1
                 os.makedirs(folder_path, exist_ok=True)
 
                 body_html = ""
@@ -736,25 +862,68 @@ class GmailDownloaderApp:
                 """
 
                     pdf_path = os.path.join(folder_path, "Mensaje_Legible.pdf")
-                    if self.convert_html_to_pdf(page, pdf_html, pdf_path):
+                    # Auto-recuperación Playwright
+                    pdf_ok = False
+                    for pw_attempt in range(2):
+                        try:
+                            if self.convert_html_to_pdf(
+                                page, pdf_html, pdf_path
+                            ):
+                                pdf_ok = True
+                                break
+                        except Exception as pw_err:
+                            if pw_attempt == 0:
+                                self.log(
+                                    "  [PLAYWRIGHT] "
+                                    "Reiniciando..."
+                                )
+                                pw_context, browser, page = (
+                                    self._restart_playwright(
+                                        pw_context, browser
+                                    )
+                                )
+                            else:
+                                self.log(
+                                    f"  [ERROR PDF] "
+                                    f"{pw_err}"
+                                )
+                    if pdf_ok:
                         self.log("  PDF guardado en Mensaje_Legible.pdf")
                     else:
                         self.log("  [AVISO] No se pudo generar el PDF")
                 elif want_body and not PLAYWRIGHT_AVAILABLE:
                     self.log("  [AVISO] playwright no instalado, PDF omitido")
 
-                # Actualizar barra de progreso
+                # Registrar en manifest y actualizar progreso
+                manifest[eid_str] = {
+                    "fecha": fecha,
+                    "asunto": asunto[:80],
+                    "descargado": datetime.now().isoformat()
+                }
+                self._save_manifest(manifest)
+                downloaded += 1
                 self.root.after(0, self.progress.config, {"value": idx})
 
-            # Actualizar cuota diaria
+            # Resumen final
+            elapsed = time.time() - start_time
+            mins = int(elapsed // 60)
+            secs = int(elapsed % 60)
             self.daily_bytes += batch_bytes
             save_daily_quota(self.daily_bytes)
             pct = self.daily_bytes / GMAIL_DAILY_LIMIT * 100
-            self.log(f"Descarga masiva completada exitosamente!")
-            self.log(f"[CUOTA] Este batch: {format_size(batch_bytes)} | Hoy: {format_size(self.daily_bytes)} de 2500 MB ({pct:.1f}%)")
+            self.log(f"")
+            self.log(f"{'='*40}")
+            self.log(f"Descarga finalizada en {mins}m {secs}s")
+            self.log(f"  Descargados: {downloaded}")
+            if skipped > 0:
+                self.log(f"  Duplicados saltados: {skipped}")
+            if self._cancel_event.is_set():
+                self.log(f"  Cancelados: {total - idx}")
+            self.log(f"[CUOTA] Batch: {format_size(batch_bytes)} | Hoy: {format_size(self.daily_bytes)} de 2500 MB ({pct:.1f}%)")
             if pct >= 80:
-                self.log("[CUOTA] ADVERTENCIA: Vas por encima del 80% del límite diario de Gmail.")
-            self.root.after(0, self._download_finished, len(items_data))
+                self.log("[CUOTA] ADVERTENCIA: >80% del límite diario.")
+            self.log(f"{'='*40}")
+            self.root.after(0, self._download_finished, downloaded)
 
         except Exception as e:
             self.log(f"Error crítico durante descarga: {str(e)}")
@@ -771,9 +940,20 @@ class GmailDownloaderApp:
                     pw_context.stop()
                 except Exception:
                     pass
-            self.root.after(0, self.btn_download.config, {"state": "normal"})
-            self.root.after(0, self.progress.pack_forget)
+            # Restaurar UI: ocultar cancelar, mostrar descargar
+            def _restore_ui():
+                self.btn_cancel.pack_forget()
+                self.btn_download.pack(side="right", padx=5)
+                self.progress_frame.pack_forget()
+            self.root.after(0, _restore_ui)
             self._close_imap()
+            # Cerrar log a archivo
+            if self._log_file:
+                try:
+                    self._log_file.close()
+                except Exception:
+                    pass
+                self._log_file = None
 
     def _compress_single_pdf(self, pdf_path, gs_path=None):
         """Comprime un PDF con Ghostscript (calidad /printer, 300 DPI).
