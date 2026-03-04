@@ -12,6 +12,9 @@ import base64
 import json
 from datetime import date
 
+# Playwright portable: buscar Chromium en carpeta local del proyecto
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browsers")
+
 try:
     from playwright.sync_api import sync_playwright
     PLAYWRIGHT_AVAILABLE = True
