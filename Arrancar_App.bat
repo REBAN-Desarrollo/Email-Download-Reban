@@ -3,16 +3,27 @@ setlocal enabledelayedexpansion
 title Iniciando Gmail Downloader...
 color 0A
 
+:: Resolver ruta del script para que funcione desde cualquier carpeta
+set "SCRIPT_DIR=%~dp0"
+cd /d "!SCRIPT_DIR!"
+
 echo ===================================================
 echo    Iniciando App de Descarga de Correos
 echo ===================================================
 echo.
 
+:: Verificar que app.py existe
+if not exist "!SCRIPT_DIR!app.py" (
+    echo [ERROR] No se encontro app.py en la carpeta del script.
+    pause
+    exit /b
+)
+
 set PYTHON_CMD=python
 
 :: 1. Intentar comando normal (si esta en PATH)
 %PYTHON_CMD% --version >nul 2>&1
-if %errorlevel% equ 0 goto :PYTHON_FOUND
+if !errorlevel! equ 0 goto :PYTHON_FOUND
 
 echo [INFO] Python no esta en el PATH, buscando en carpetas comunes...
 
@@ -68,6 +79,11 @@ if not exist python_installer.exe (
 echo [INSTALANDO] Instalando Python silenciosamente (esto tomara unos minutos, por favor espera)...
 :: Instalar sin mostrar ventanas, agregando al PATH
 start /wait python_installer.exe /quiet InstallAllUsers=0 PrependPath=1 Include_test=0
+if !errorlevel! neq 0 (
+    echo [ERROR] La instalacion de Python fallo.
+    pause
+    exit /b
+)
 echo [INFO] Instalacion terminada. Limpiando el instalador...
 del python_installer.exe
 
@@ -82,7 +98,7 @@ for /d %%D in ("%LOCALAPPDATA%\Programs\Python\Python*") do (
 
 :: Si aun asi falla, intentar el comando basico
 python --version >nul 2>&1
-if %errorlevel% neq 0 (
+if !errorlevel! neq 0 (
      echo [ERROR] Instalacion completada, pero es necesario reiniciar esta ventana.
      echo Por favor, cierra esta ventana negra y vuelve a hacer doble click en Arrancar_App.bat
      pause
@@ -100,7 +116,7 @@ echo.
 echo [1/2] Verificando e instalando dependencias (xhtml2pdf)...
 :: Usar pip asociado al python encontrado
 "!PYTHON_CMD!" -m pip install xhtml2pdf --quiet
-if %errorlevel% neq 0 (
+if !errorlevel! neq 0 (
     echo [ERROR] Hubo un problema instalando las dependencias necesarias.
     pause
     exit /b
@@ -110,11 +126,12 @@ echo.
 
 echo [2/2] Abriendo la aplicacion...
 :: Intentar lanzar con pythonw (sin consola) si existe, sino con python normal
-set "PYTHONW_CMD=!PYTHON_CMD:python.exe=pythonw.exe!"
-if exist "!PYTHONW_CMD!" (
-    start "" "!PYTHONW_CMD!" app.py
+:: Obtener directorio real del ejecutable de Python
+for %%I in ("!PYTHON_CMD!") do set "PYTHON_DIR=%%~dpI"
+if exist "!PYTHON_DIR!pythonw.exe" (
+    start "" "!PYTHON_DIR!pythonw.exe" "!SCRIPT_DIR!app.py"
 ) else (
-    start "" "!PYTHON_CMD!" app.py
+    start "" "!PYTHON_CMD!" "!SCRIPT_DIR!app.py"
 )
 
 exit
