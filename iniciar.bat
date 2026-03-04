@@ -48,6 +48,37 @@ if not exist "%PLAYWRIGHT_BROWSERS_PATH%\chromium_headless_shell-*" (
     )
 )
 echo [OK] Chromium portable listo.
+ 
+:: 4. Verificar Ghostscript (para compresion de PDFs)
+set "GS_FOUND=0"
+where gswin64c >nul 2>&1 && set "GS_FOUND=1"
+if "%GS_FOUND%"=="0" (
+    if exist "C:\Program Files\gs\gs*\bin\gswin64c.exe" set "GS_FOUND=1"
+)
+if "%GS_FOUND%"=="0" (
+    echo [INSTALANDO] Ghostscript para compresion de PDFs...
+    echo   Descargando instalador...
+    powershell -Command "Invoke-WebRequest -Uri 'https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10060/gs10060w64.exe' -OutFile '%TEMP%\gs_installer.exe' -UseBasicParsing"
+    if %ERRORLEVEL% neq 0 (
+        echo [AVISO] No se pudo descargar Ghostscript. La compresion de PDFs no estara disponible.
+        goto :skip_gs
+    )
+    echo   Instalando silenciosamente...
+    "%TEMP%\gs_installer.exe" /S
+    del "%TEMP%\gs_installer.exe" 2>nul
+    echo [OK] Ghostscript instalado.
+) else (
+    echo [OK] Ghostscript encontrado.
+)
+:skip_gs
+
+:: 5. Verificar pypdf
+py -c "import pypdf" >nul 2>&1
+if %ERRORLEVEL% neq 0 (
+    echo [INSTALANDO] pypdf...
+    py -m pip install "pypdf>=4.0,<5.0" --quiet
+)
+echo [OK] pypdf instalado.
 
 echo.
 echo ========================================
@@ -55,5 +86,5 @@ echo   Iniciando Gmail Downloader...
 echo ========================================
 echo.
 
-:: 4. Ejecutar la app
+:: 6. Ejecutar la app
 py "%~dp0app.py"

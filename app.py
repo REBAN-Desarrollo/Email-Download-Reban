@@ -6,20 +6,92 @@ import email
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
 import os
+import sys
 import re
 import html  # para escapar HTML en PDFs
 import base64
 import json
+import subprocess
+import glob
 from datetime import date
 
+def find_ghostscript():
+    """Busca gswin64c.exe en rutas estándar de Windows.
+    Retorna la ruta completa o None."""
+    # 1. Buscar en PATH del sistema
+    for cmd in ("gswin64c", "gswin32c", "gs"):
+        for d in os.environ.get("PATH", "").split(";"):
+            exe = os.path.join(d, cmd + ".exe")
+            if os.path.isfile(exe):
+                return exe
+    # 2. Buscar en rutas de instalación comunes
+    search_roots = [
+        os.path.join(
+            os.environ.get("ProgramFiles", "C:\\Program Files"),
+            "gs"
+        ),
+        os.path.join(
+            os.environ.get(
+                "ProgramFiles(x86)",
+                "C:\\Program Files (x86)"
+            ), "gs"
+        ),
+    ]
+    for root in search_roots:
+        pattern = os.path.join(root, "gs*", "bin", "gswin*c.exe")
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+    return None
+
+GS_PATH = find_ghostscript()
+
 # Playwright portable: buscar Chromium en carpeta local del proyecto
-os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browsers")
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "browsers"
+)
 
 try:
     from playwright.sync_api import sync_playwright
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
+
+
+def ensure_chromium_installed():
+    """Verifica que Chromium exista en browsers/. Si no, lo descarga."""
+    if not PLAYWRIGHT_AVAILABLE:
+        return
+    browsers_dir = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    if not browsers_dir:
+        return
+    # Buscar si existe alguna carpeta chromium_headless_shell-*
+    if os.path.isdir(browsers_dir):
+        for name in os.listdir(browsers_dir):
+            if name.startswith("chromium_headless_shell-"):
+                # Verificar que el ejecutable exista dentro
+                exe = os.path.join(
+                    browsers_dir, name,
+                    "chrome-win", "headless_shell.exe"
+                )
+                if os.path.isfile(exe):
+                    return  # Todo en orden
+    # No existe o está incompleto — descargar
+    import subprocess
+    subprocess.run(
+        [sys.executable, "-m", "playwright",
+         "install", "chromium"],
+        check=True
+    )
+    # Limpiar browser completo innecesario (solo headless shell)
+    if os.path.isdir(browsers_dir):
+        for name in os.listdir(browsers_dir):
+            if name.startswith("chromium-"):
+                import shutil
+                shutil.rmtree(
+                    os.path.join(browsers_dir, name),
+                    ignore_errors=True
+                )
 
 def format_size(size_bytes):
     """Formatea bytes a cadena legible (B, KB, MB)"""
@@ -32,7 +104,12 @@ def format_size(size_bytes):
 
 def clean_filename(name):
     """Limpia caracteres inválidos para nombres de archivos en Windows"""
-    return re.sub(r'[\\/*?:"<>|]', "", name).strip()[:100]
+    # Eliminar caracteres de control (\r, \n, \t, etc.) y
+    # caracteres prohibidos en Windows
+    cleaned = re.sub(r'[\x00-\x1f\\/*?:"<>|]', "", name)
+    # Colapsar espacios múltiples que queden tras la limpieza
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    return cleaned.strip()[:100]
 
 def decode_str(header_str):
     """Decodifica un header de email (ej: Asunto o Remitente)"""
@@ -67,6 +144,7 @@ GMAIL_DAILY_LIMIT = 2500 * 1024 * 1024  # 2500 MB
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 QUOTA_FILE = os.path.join(os.path.expanduser("~"), ".gmail_downloader_quota.json")
 SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
+
 
 def load_settings():
     """Carga los últimos settings guardados."""
@@ -125,6 +203,12 @@ class GmailDownloaderApp:
         if not PLAYWRIGHT_AVAILABLE:
             self.log("[AVISO] playwright no está instalado. No se podrán generar PDFs.")
             self.log("  Instalar: pip install playwright && playwright install chromium")
+        elif PLAYWRIGHT_AVAILABLE:
+            # Auto-verificar/descargar Chromium al iniciar
+            try:
+                ensure_chromium_installed()
+            except Exception as e:
+                self.log(f"[AVISO] No se pudo verificar Chromium: {e}")
 
     def log(self, message):
         """Añade un mensaje al log en la interfaz gráfica (thread-safe)"""
@@ -246,6 +330,12 @@ class GmailDownloaderApp:
 
         self.btn_download = ttk.Button(frame_action, text="Descargar Seleccionados (Batch)", command=self.start_download)
         self.btn_download.pack(side="right", padx=5)
+
+        # Botón para comprimir PDFs existentes
+        self.btn_compress = ttk.Button(frame_action, text="Comprimir PDFs en Carpeta", command=self.start_compress_pdfs)
+        self.btn_compress.pack(side="right", padx=5)
+        if not GS_PATH:
+            self.btn_compress.config(state="disabled")
 
         # --- Log Text ---
         self.log_text = tk.Text(self.root, height=8, state='disabled', bg="#f4f4f4")
@@ -484,6 +574,9 @@ class GmailDownloaderApp:
             page.pdf(path=output_filename, format="Letter",
                      margin={"top": "15mm", "bottom": "15mm",
                              "left": "10mm", "right": "10mm"})
+            # Auto-comprimir el PDF recién generado
+            if GS_PATH:
+                self._compress_single_pdf(output_filename)
             return True
         except Exception as e:
             self.log(f"Error convirtiendo PDF: {e}")
@@ -657,6 +750,153 @@ class GmailDownloaderApp:
             self.root.after(0, self.btn_download.config, {"state": "normal"})
             self.root.after(0, self.progress.pack_forget)
             self._close_imap()
+
+    def _compress_single_pdf(self, pdf_path):
+        """Comprime un PDF con Ghostscript (calidad /printer, 300 DPI).
+        Retorna (original_bytes, compressed_bytes, error_str)."""
+        if not GS_PATH:
+            return 0, 0, "Ghostscript no encontrado"
+        try:
+            original_size = os.path.getsize(pdf_path)
+            tmp_path = pdf_path + ".gs.tmp"
+
+            result = subprocess.run(
+                [
+                    GS_PATH,
+                    "-sDEVICE=pdfwrite",
+                    "-dCompatibilityLevel=1.4",
+                    "-dPDFSETTINGS=/printer",
+                    "-dNOPAUSE",
+                    "-dBATCH",
+                    "-dQUIET",
+                    f"-sOutputFile={tmp_path}",
+                    pdf_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            if result.returncode != 0:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                err_msg = result.stderr.strip()[:200]
+                return 0, 0, err_msg or "Ghostscript falló"
+
+            new_size = os.path.getsize(tmp_path)
+            if new_size < original_size:
+                os.replace(tmp_path, pdf_path)
+                return original_size, new_size, None
+            else:
+                os.remove(tmp_path)
+                return original_size, original_size, None
+        except Exception as e:
+            tmp_path = pdf_path + ".gs.tmp"
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            return 0, 0, str(e)
+
+    def start_compress_pdfs(self):
+        """Inicia la compresión de PDFs en hilo separado."""
+        if not GS_PATH:
+            messagebox.showwarning(
+                "Ghostscript no encontrado",
+                "Instala Ghostscript desde:\n"
+                "https://ghostscript.com/releases/gsdnld.html\n\n"
+                "Reinicia la app después de instalar."
+            )
+            return
+        if not os.path.isdir(self.output_dir):
+            messagebox.showwarning(
+                "Carpeta no encontrada",
+                f"La carpeta no existe:\n{self.output_dir}"
+            )
+            return
+        self.btn_compress.config(state="disabled")
+        threading.Thread(
+            target=self._compress_pdfs_in_folder,
+            daemon=True
+        ).start()
+
+    def _compress_pdfs_in_folder(self):
+        """Escanea carpeta de output y comprime todos los PDFs."""
+        try:
+            # Encontrar todos los PDFs recursivamente
+            pdf_files = []
+            for dirpath, _, filenames in os.walk(self.output_dir):
+                for f in filenames:
+                    if f.lower().endswith(".pdf"):
+                        pdf_files.append(os.path.join(dirpath, f))
+
+            if not pdf_files:
+                self.log("[PDF] No se encontraron archivos PDF.")
+                return
+
+            self.log(f"")
+            self.log(f"[PDF] Comprimiendo {len(pdf_files)} PDF(s)...")
+            total_original = 0
+            total_compressed = 0
+            compressed_count = 0
+
+            error_count = 0
+
+            for i, pdf_path in enumerate(pdf_files, 1):
+                rel_path = os.path.relpath(pdf_path, self.output_dir)
+                orig, comp, err = self._compress_single_pdf(pdf_path)
+                if err:
+                    error_count += 1
+                    self.log(
+                        f"  [{i}/{len(pdf_files)}] {rel_path}: "
+                        f"ERROR - {err}"
+                    )
+                    continue
+                total_original += orig
+                total_compressed += comp
+                if orig > comp:
+                    compressed_count += 1
+                    savings = (1 - comp / orig) * 100
+                    self.log(
+                        f"  [{i}/{len(pdf_files)}] {rel_path}: "
+                        f"{format_size(orig)} → "
+                        f"{format_size(comp)} "
+                        f"({savings:.0f}%)"
+                    )
+                else:
+                    self.log(
+                        f"  [{i}/{len(pdf_files)}] {rel_path}: "
+                        f"ya optimizado ({format_size(orig)})"
+                    )
+
+            # Resumen final
+            processed = len(pdf_files) - error_count
+            if total_original > 0:
+                total_savings = (
+                    (1 - total_compressed / total_original) * 100
+                )
+                self.log(
+                    f"[PDF] Listo: {compressed_count}/"
+                    f"{processed} comprimidos | "
+                    f"{format_size(total_original)} → "
+                    f"{format_size(total_compressed)} "
+                    f"(ahorro total {total_savings:.0f}%)"
+                )
+            elif processed > 0:
+                self.log(
+                    f"[PDF] {processed} PDF(s) ya estaban "
+                    f"optimizados."
+                )
+            if error_count > 0:
+                self.log(
+                    f"[PDF] {error_count} PDF(s) no se "
+                    f"pudieron procesar (ver errores arriba)."
+                )
+
+        except Exception as e:
+            self.log(f"[PDF] Error: {e}")
+        finally:
+            self.root.after(
+                0, self.btn_compress.config, {"state": "normal"}
+            )
 
     def _download_finished(self, count):
         if messagebox.askyesno("Éxito", f"Se han descargado {count} correos exitosamente.\n¿Abrir carpeta de destino?"):

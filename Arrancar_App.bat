@@ -113,9 +113,9 @@ if !errorlevel! neq 0 (
 echo [OK] Python detectado en: !PYTHON_CMD!
 echo.
 
-echo [1/2] Verificando e instalando dependencias (xhtml2pdf)...
+echo [1/3] Verificando e instalando dependencias...
 :: Usar pip asociado al python encontrado
-"!PYTHON_CMD!" -m pip install xhtml2pdf --quiet
+"!PYTHON_CMD!" -m pip install -r "!SCRIPT_DIR!requirements.txt" --quiet
 if !errorlevel! neq 0 (
     echo [ERROR] Hubo un problema instalando las dependencias necesarias.
     pause
@@ -124,7 +124,26 @@ if !errorlevel! neq 0 (
 echo Listo.
 echo.
 
-echo [2/2] Abriendo la aplicacion...
+echo [2/3] Verificando Chromium para PDFs...
+set "PLAYWRIGHT_BROWSERS_PATH=!SCRIPT_DIR!browsers"
+if not exist "!PLAYWRIGHT_BROWSERS_PATH!\chromium_headless_shell-*" (
+    echo [INSTALANDO] Chromium headless en carpeta local...
+    "!PYTHON_CMD!" -m playwright install chromium
+    :: Eliminar chromium completo si existe (solo necesitamos headless shell)
+    for /d %%d in ("!PLAYWRIGHT_BROWSERS_PATH!\chromium-*") do (
+        echo [LIMPIEZA] Eliminando browser completo innecesario...
+        rmdir /s /q "%%d"
+    )
+    if !errorlevel! neq 0 (
+        echo [ERROR] No se pudo instalar Chromium.
+        pause
+        exit /b
+    )
+)
+echo [OK] Chromium portable listo.
+echo.
+
+echo [3/3] Abriendo la aplicacion...
 :: Intentar lanzar con pythonw (sin consola) si existe, sino con python normal
 :: Obtener directorio real del ejecutable de Python
 for %%I in ("!PYTHON_CMD!") do set "PYTHON_DIR=%%~dpI"
