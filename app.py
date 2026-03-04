@@ -9,6 +9,8 @@ import os
 import re
 import html  # para escapar HTML en PDFs
 import base64
+import json
+from datetime import date
 
 try:
     from playwright.sync_api import sync_playwright
@@ -58,6 +60,27 @@ def validate_imap_date(date_str):
         return False
     return True
 
+GMAIL_DAILY_LIMIT = 2500 * 1024 * 1024  # 2500 MB
+QUOTA_FILE = os.path.join(os.path.expanduser("~"), ".gmail_downloader_quota.json")
+
+def load_daily_quota():
+    """Carga la cuota diaria. Resetea si es un día nuevo."""
+    today = date.today().isoformat()
+    try:
+        with open(QUOTA_FILE, "r") as f:
+            data = json.load(f)
+        if data.get("date") == today:
+            return data.get("bytes", 0)
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+    return 0
+
+def save_daily_quota(total_bytes):
+    """Guarda la cuota acumulada del día."""
+    today = date.today().isoformat()
+    with open(QUOTA_FILE, "w") as f:
+        json.dump({"date": today, "bytes": total_bytes}, f)
+
 class GmailDownloaderApp:
     def __init__(self, root):
         self.root = root
@@ -72,8 +95,13 @@ class GmailDownloaderApp:
         self.download_body = tk.BooleanVar(value=True)
         self.download_attachments = tk.BooleanVar(value=True)
         self.size_cache = {}  # iid → bytes raw para cálculo de tamaño
+        self.daily_bytes = load_daily_quota()
 
         self.create_widgets()
+
+        if self.daily_bytes > 0:
+            pct = self.daily_bytes / GMAIL_DAILY_LIMIT * 100
+            self.log(f"[CUOTA] Uso hoy: {format_size(self.daily_bytes)} de 2500 MB ({pct:.1f}%)")
 
         if not PLAYWRIGHT_AVAILABLE:
             self.log("[AVISO] playwright no está instalado. No se podrán generar PDFs.")
@@ -417,12 +445,15 @@ class GmailDownloaderApp:
             if not template:
                 template = "{date}_{subject}"
 
+            batch_bytes = 0
+
             for idx, item in enumerate(items_data, 1):
                 eid_str, fecha, remitente, asunto = item[0], item[1], item[2], item[3]
                 self.log(f"Descargando [{idx}/{len(items_data)}]: {asunto[:30]}...")
 
                 _, msg_data = self.mail_conn.fetch(eid_str.encode(), "(BODY.PEEK[])")
                 raw_email = msg_data[0][1]
+                batch_bytes += len(raw_email)
                 msg = email.message_from_bytes(raw_email)
 
                 # Procesar Wildcards / Template para la carpeta
@@ -531,7 +562,14 @@ class GmailDownloaderApp:
                 # Actualizar barra de progreso
                 self.root.after(0, self.progress.config, {"value": idx})
 
-            self.log("Descarga masiva completada exitosamente!")
+            # Actualizar cuota diaria
+            self.daily_bytes += batch_bytes
+            save_daily_quota(self.daily_bytes)
+            pct = self.daily_bytes / GMAIL_DAILY_LIMIT * 100
+            self.log(f"Descarga masiva completada exitosamente!")
+            self.log(f"[CUOTA] Este batch: {format_size(batch_bytes)} | Hoy: {format_size(self.daily_bytes)} de 2500 MB ({pct:.1f}%)")
+            if pct >= 80:
+                self.log("[CUOTA] ADVERTENCIA: Vas por encima del 80% del límite diario de Gmail.")
             self.root.after(0, self._download_finished, len(items_data))
 
         except Exception as e:
