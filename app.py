@@ -224,7 +224,7 @@ class GmailDownloaderApp:
             self.root.after(0, self.btn_test.config, {"state": "normal"})
 
     def start_search(self):
-        self.root.after(0, self.btn_search.config, {"state": "disabled"})
+        self.btn_search.config(state="disabled")
         self.tree.delete(*self.tree.get_children())
         threading.Thread(target=self.search_emails, daemon=True).start()
 
@@ -270,10 +270,15 @@ class GmailDownloaderApp:
             for eid in ids:
                 # PEEK previene marcar los correos como leídos
                 _, msg_data = self.mail_conn.fetch(eid, "(BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT)])")
-                if not msg_data or not msg_data[0]:
+                if not msg_data or msg_data[0] is None:
                     continue
 
-                raw_header = msg_data[0][1]
+                # msg_data puede ser [(b'flags', b'header'), b')'] — tomar el primer elemento tupla
+                raw_part = msg_data[0]
+                if isinstance(raw_part, tuple):
+                    raw_header = raw_part[1]
+                else:
+                    continue
                 msg = email.message_from_bytes(raw_header)
 
                 try:
@@ -285,7 +290,7 @@ class GmailDownloaderApp:
                 remitente = decode_str(msg.get("From", ""))
                 asunto = decode_str(msg.get("Subject", ""))
 
-                self.root.after(0, self.tree.insert, "", "end", None, {"values": (eid.decode(), fecha_str, remitente, asunto)})
+                self.root.after(0, lambda e=eid, f=fecha_str, r=remitente, a=asunto: self.tree.insert("", "end", values=(e.decode(), f, r, a)))
 
             self.log("Búsqueda completada.")
         except Exception as e:
@@ -301,7 +306,7 @@ class GmailDownloaderApp:
             return
 
         items_data = [self.tree.item(item, "values") for item in selected_items]
-        self.root.after(0, self.btn_download.config, {"state": "disabled"})
+        self.btn_download.config(state="disabled")
         threading.Thread(target=self.download_emails, args=(items_data,), daemon=True).start()
 
     def convert_html_to_pdf(self, source_html, output_filename):
