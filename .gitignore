@@ -23,5 +23,14 @@ python_installer.exe
 # Gemini
 .gemini/
 
+# Browsers (se descargan automáticamente con iniciar.bat)
+browsers/
+
+# Testing
+testing/
+
 # Settings con credenciales
 settings.json
+
+# Quota tracker
+daily_quota.json
