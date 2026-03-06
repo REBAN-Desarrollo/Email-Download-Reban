@@ -113,31 +113,37 @@ if !errorlevel! neq 0 (
 echo [OK] Python detectado en: !PYTHON_CMD!
 echo.
 
-echo [1/3] Verificando e instalando dependencias...
-:: Usar pip asociado al python encontrado
-"!PYTHON_CMD!" -m pip install -r "!SCRIPT_DIR!requirements.txt" --quiet
+echo [1/3] Verificando dependencias...
+:: Verificar si ya estan instaladas antes de correr pip install
+"!PYTHON_CMD!" -c "import playwright; import pypdf; import xhtml2pdf" >nul 2>&1
 if !errorlevel! neq 0 (
-    echo [ERROR] Hubo un problema instalando las dependencias necesarias.
-    pause
-    exit /b
+    echo [INSTALANDO] Instalando dependencias faltantes...
+    "!PYTHON_CMD!" -m pip install -r "!SCRIPT_DIR!requirements.txt" --quiet
+    if !errorlevel! neq 0 (
+        echo [ERROR] Hubo un problema instalando las dependencias necesarias.
+        pause
+        exit /b
+    )
 )
-echo Listo.
+echo [OK] Dependencias listas.
 echo.
 
 echo [2/3] Verificando Chromium para PDFs...
 set "PLAYWRIGHT_BROWSERS_PATH=!SCRIPT_DIR!browsers"
-if not exist "!PLAYWRIGHT_BROWSERS_PATH!\chromium_headless_shell-*" (
+set "CHROMIUM_FOUND=0"
+for /d %%d in ("!PLAYWRIGHT_BROWSERS_PATH!\chromium_headless_shell-*") do set "CHROMIUM_FOUND=1"
+if "!CHROMIUM_FOUND!"=="0" (
     echo [INSTALANDO] Chromium headless en carpeta local...
     "!PYTHON_CMD!" -m playwright install chromium
-    :: Eliminar chromium completo si existe (solo necesitamos headless shell)
-    for /d %%d in ("!PLAYWRIGHT_BROWSERS_PATH!\chromium-*") do (
-        echo [LIMPIEZA] Eliminando browser completo innecesario...
-        rmdir /s /q "%%d"
-    )
     if !errorlevel! neq 0 (
         echo [ERROR] No se pudo instalar Chromium.
         pause
         exit /b
+    )
+    :: Eliminar chromium completo si existe (solo necesitamos headless shell)
+    for /d %%d in ("!PLAYWRIGHT_BROWSERS_PATH!\chromium-*") do (
+        echo [LIMPIEZA] Eliminando browser completo innecesario...
+        rmdir /s /q "%%d"
     )
 )
 echo [OK] Chromium portable listo.

@@ -33,18 +33,20 @@ echo [OK] playwright instalado.
 
 :: 3. Verificar Chromium en carpeta local browsers/
 set "PLAYWRIGHT_BROWSERS_PATH=%~dp0browsers"
-if not exist "%PLAYWRIGHT_BROWSERS_PATH%\chromium_headless_shell-*" (
+set "CHROMIUM_FOUND=0"
+for /d %%d in ("%PLAYWRIGHT_BROWSERS_PATH%\chromium_headless_shell-*") do set "CHROMIUM_FOUND=1"
+if "%CHROMIUM_FOUND%"=="0" (
     echo [INSTALANDO] Chromium headless en carpeta local...
     py -m playwright install chromium
-    :: Eliminar chromium completo si existe (solo necesitamos headless shell)
-    for /d %%d in ("%PLAYWRIGHT_BROWSERS_PATH%\chromium-*") do (
-        echo [LIMPIEZA] Eliminando browser completo innecesario...
-        rmdir /s /q "%%d"
-    )
     if %ERRORLEVEL% neq 0 (
         echo [ERROR] No se pudo instalar Chromium.
         pause
         exit /b 1
+    )
+    :: Eliminar chromium completo si existe (solo necesitamos headless shell)
+    for /d %%d in ("%PLAYWRIGHT_BROWSERS_PATH%\chromium-*") do (
+        echo [LIMPIEZA] Eliminando browser completo innecesario...
+        rmdir /s /q "%%d"
     )
 )
 echo [OK] Chromium portable listo.
@@ -53,7 +55,9 @@ echo [OK] Chromium portable listo.
 set "GS_FOUND=0"
 where gswin64c >nul 2>&1 && set "GS_FOUND=1"
 if "%GS_FOUND%"=="0" (
-    if exist "C:\Program Files\gs\gs*\bin\gswin64c.exe" set "GS_FOUND=1"
+    for /d %%d in ("C:\Program Files\gs\gs*") do (
+        if exist "%%d\bin\gswin64c.exe" set "GS_FOUND=1"
+    )
 )
 if "%GS_FOUND%"=="0" (
     echo [INSTALANDO] Ghostscript para compresion de PDFs...
