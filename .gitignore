@@ -23,8 +23,11 @@ python_installer.exe
 # Gemini
 .gemini/
 
-# Browsers (se descargan automáticamente con iniciar.bat)
+# Browsers (se descargan automáticamente con Arrancar_App.bat)
 browsers/
+
+# Logs de depuracion (auto-limpieza 7 dias)
+logs/
 
 # Testing
 testing/
