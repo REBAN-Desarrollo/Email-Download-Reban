@@ -141,7 +141,7 @@ class GmailDownloaderApp(IMAPMixin, DownloadMixin):
 
         # Fila 2: asunto, keyword, fechas, buscar
         r2 = tk.Frame(ribbon, bg="#dfe6e9")
-        r2.pack(fill="x", padx=10, pady=(2, 5))
+        r2.pack(fill="x", padx=10, pady=(2, 2))
 
         ttk.Label(r2, text="Asunto:", background="#dfe6e9").pack(side="left")
         self.subject_entry = ttk.Entry(r2, width=20)
@@ -151,21 +151,23 @@ class GmailDownloaderApp(IMAPMixin, DownloadMixin):
         self.keyword_entry = ttk.Entry(r2, width=15)
         self.keyword_entry.pack(side="left", padx=5)
 
-        ttk.Separator(r2, orient="vertical").pack(side="left", fill="y", padx=8, pady=2)
-
-        ttk.Label(r2, text="Desde:", background="#dfe6e9").pack(side="left")
-        self.since_picker = DatePicker(r2, bg="#dfe6e9")
-        self.since_picker.pack(side="left", padx=5)
-
-        ttk.Label(r2, text="Hasta:", background="#dfe6e9").pack(side="left")
-        self.before_picker = DatePicker(r2, bg="#dfe6e9")
-        self.before_picker.pack(side="left", padx=5)
-
         ttk.Checkbutton(r2, text="Solo con adjuntos",
                          variable=self.has_attachments_filter).pack(side="left", padx=(10, 5))
 
-        self.btn_search = ttk.Button(r2, text="Buscar", command=self.start_search)
-        self.btn_search.pack(side="right", padx=5)
+        # Fila 3: fechas y boton buscar
+        r3 = tk.Frame(ribbon, bg="#dfe6e9")
+        r3.pack(fill="x", padx=10, pady=(2, 5))
+
+        ttk.Label(r3, text="Desde:", background="#dfe6e9").pack(side="left")
+        self.since_picker = DatePicker(r3, bg="#dfe6e9")
+        self.since_picker.pack(side="left", padx=5)
+
+        ttk.Label(r3, text="Hasta:", background="#dfe6e9").pack(side="left")
+        self.before_picker = DatePicker(r3, bg="#dfe6e9")
+        self.before_picker.pack(side="left", padx=5)
+
+        self.btn_search = ttk.Button(r3, text="Buscar", command=self.start_search)
+        self.btn_search.pack(side="left", padx=5)
 
         # === CONTENIDO PRINCIPAL: tabla + preview (PanedWindow horizontal) ===
         self.paned = ttk.PanedWindow(self.root, orient="horizontal")
@@ -225,19 +227,23 @@ class GmailDownloaderApp(IMAPMixin, DownloadMixin):
         self.preview_body.tag_configure("attachment", foreground="#2980b9",
                                          font=("Segoe UI", 9, "bold"))
 
-        # === TOOLBAR: seleccionar / descargar (entre tabla y carpeta destino) ===
+        # === TOOLBAR: seleccionar (entre tabla y acciones de descarga) ===
         frame_toolbar = tk.Frame(self.root, bg="#ecf0f1")
         frame_toolbar.pack(fill="x", padx=10, pady=2)
-        ttk.Button(frame_toolbar, text="Sel. Todos", command=self.select_all).pack(side="left", padx=2)
+        ttk.Button(frame_toolbar, text="Seleccionar todos", command=self.select_all).pack(side="left", padx=2)
         ttk.Button(frame_toolbar, text="Deseleccionar", command=self.deselect_all).pack(side="left", padx=2)
-        self.btn_download = ttk.Button(frame_toolbar, text="Descargar Seleccionados",
-                                        command=self.start_download, state="disabled")
-        self.btn_download.pack(side="left", padx=2)
-        self.btn_cancel = ttk.Button(frame_toolbar, text="Cancelar", command=self._cancel_download)
-        self.btn_compress = ttk.Button(frame_toolbar, text="Comprimir PDFs", command=self.start_compress_pdfs)
-        self.btn_compress.pack(side="left", padx=2)
         self.selection_label = ttk.Label(frame_toolbar, text="0 de 0 seleccionados", background="#ecf0f1")
         self.selection_label.pack(side="right", padx=5)
+
+        # === TOOLBAR 2: descargar / comprimir ===
+        frame_actions = tk.Frame(self.root, bg="#ecf0f1")
+        frame_actions.pack(fill="x", padx=10, pady=2)
+        self.btn_download = ttk.Button(frame_actions, text="Descargar Seleccionados",
+                                        command=self.start_download, state="disabled")
+        self.btn_download.pack(side="left", padx=2)
+        self.btn_cancel = ttk.Button(frame_actions, text="Cancelar", command=self._cancel_download)
+        self.btn_compress = ttk.Button(frame_actions, text="Comprimir PDFs", command=self.start_compress_pdfs)
+        self.btn_compress.pack(side="left", padx=2)
 
         # === BARRA INFERIOR: acciones + progreso ===
         bottom = tk.Frame(self.root, bg="#ecf0f1")
