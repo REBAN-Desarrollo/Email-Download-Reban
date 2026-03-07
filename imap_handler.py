@@ -36,13 +36,15 @@ class IMAPMixin:
             pass
         return []
 
-    def _close_imap(self):
-        if self.mail_conn:
+    def _close_imap(self, conn=None):
+        target = conn or self.mail_conn
+        if target:
             try:
-                self.mail_conn.logout()
+                target.logout()
             except Exception:
                 pass
-            self.mail_conn = None
+            if self.mail_conn is target:
+                self.mail_conn = None
 
     def _close_preview_conn(self):
         if self._preview_conn:
@@ -152,8 +154,10 @@ class IMAPMixin:
         return f'OR {parts[0]} ({self._build_or_chain(parts[1:])})'
 
     def search_emails(self):
+        search_conn = None
         try:
             self.connect_imap()
+            search_conn = self.mail_conn
             global_term = self.global_search_entry.get().strip()
             sender = self.sender_entry.get().strip()
             to_addr = self.to_entry.get().strip()
@@ -304,7 +308,7 @@ class IMAPMixin:
             self.log(f"Error: {str(e)}")
         finally:
             self.root.after(0, self.btn_search.config, {"state": "normal"})
-            self._close_imap()
+            self._close_imap(search_conn)
 
     # -------------------------------------------------------------------
     # Preview

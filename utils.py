@@ -128,7 +128,7 @@ def format_size(size_bytes):
 def clean_filename(name):
     cleaned = re.sub(r'[\x00-\x1f\\/*?:"<>|]', "", name)
     cleaned = re.sub(r'\s+', ' ', cleaned)
-    return cleaned.strip()[:100]
+    return cleaned.strip()[:100].rstrip(". ")
 
 
 def decode_str(header_str):

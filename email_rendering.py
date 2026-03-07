@@ -112,6 +112,8 @@ def sanitize_email_html(source_html):
         comment.extract()
 
     for tag in list(root.find_all(True)):
+        if tag.attrs is None:
+            continue
         name = (tag.name or "").lower()
         if name in DROP_TAGS or name == "xml" or ":" in name:
             tag.decompose()
