@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 setlocal enabledelayedexpansion
 title Iniciando Gmail Downloader...
 color 0A
@@ -113,7 +114,7 @@ if !errorlevel! neq 0 (
 echo [OK] Python detectado en: !PYTHON_CMD!
 echo.
 
-echo [1/3] Verificando dependencias...
+echo [1/4] Verificando dependencias...
 :: Verificar si ya estan instaladas antes de correr pip install
 "!PYTHON_CMD!" -c "import playwright; import pypdf; import xhtml2pdf" >nul 2>&1
 if !errorlevel! neq 0 (
@@ -128,7 +129,7 @@ if !errorlevel! neq 0 (
 echo [OK] Dependencias listas.
 echo.
 
-echo [2/3] Verificando Chromium para PDFs...
+echo [2/4] Verificando Chromium para PDFs...
 set "PLAYWRIGHT_BROWSERS_PATH=!SCRIPT_DIR!browsers"
 set "CHROMIUM_FOUND=0"
 for /d %%d in ("!PLAYWRIGHT_BROWSERS_PATH!\chromium_headless_shell-*") do set "CHROMIUM_FOUND=1"
@@ -149,14 +150,35 @@ if "!CHROMIUM_FOUND!"=="0" (
 echo [OK] Chromium portable listo.
 echo.
 
-echo [3/3] Abriendo la aplicacion...
-:: Intentar lanzar con pythonw (sin consola) si existe, sino con python normal
-:: Obtener directorio real del ejecutable de Python
-for %%I in ("!PYTHON_CMD!") do set "PYTHON_DIR=%%~dpI"
-if exist "!PYTHON_DIR!pythonw.exe" (
-    start "" "!PYTHON_DIR!pythonw.exe" "!SCRIPT_DIR!app.py"
-) else (
-    start "" "!PYTHON_CMD!" "!SCRIPT_DIR!app.py"
+echo [3/4] Verificando Ghostscript (compresion de PDFs)...
+set "GS_FOUND=0"
+where gswin64c >nul 2>&1 && set "GS_FOUND=1"
+if "!GS_FOUND!"=="0" (
+    for /d %%d in ("C:\Program Files\gs\gs*") do (
+        if exist "%%d\bin\gswin64c.exe" set "GS_FOUND=1"
+    )
 )
+if "!GS_FOUND!"=="0" (
+    echo [INSTALANDO] Ghostscript para compresion de PDFs...
+    echo   Descargando instalador...
+    powershell -Command "Invoke-WebRequest -Uri 'https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10060/gs10060w64.exe' -OutFile '%TEMP%\gs_installer.exe' -UseBasicParsing"
+    if !errorlevel! neq 0 (
+        echo [AVISO] No se pudo descargar Ghostscript. La compresion de PDFs no estara disponible.
+        goto :SKIP_GS
+    )
+    echo   Instalando silenciosamente...
+    "%TEMP%\gs_installer.exe" /S
+    del "%TEMP%\gs_installer.exe" 2>nul
+    echo [OK] Ghostscript instalado.
+) else (
+    echo [OK] Ghostscript encontrado.
+)
+:SKIP_GS
+echo.
+
+echo [4/4] Abriendo la aplicacion...
+:: Lanzar con python.exe y consola minimizada
+:: (pythonw.exe causa crash "Assertion failed: process_title" con Playwright/libuv)
+start /min "" "!PYTHON_CMD!" "!SCRIPT_DIR!app.py"
 
 exit
