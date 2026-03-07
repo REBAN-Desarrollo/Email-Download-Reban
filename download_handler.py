@@ -1,18 +1,27 @@
 import os
+import sys
 import json
 import time
 import threading
 import email
 import base64
-import html
 import subprocess
 from datetime import datetime
 from tkinter import messagebox
 
 from utils import (
     find_ghostscript, format_size, clean_filename, decode_str,
-    PLAYWRIGHT_AVAILABLE, sync_playwright, save_daily_quota, GMAIL_DAILY_LIMIT,
-    debug_log
+    PLAYWRIGHT_AVAILABLE, save_daily_quota, GMAIL_DAILY_LIMIT,
+    APP_DIR, debug_log
+)
+from email_rendering import (
+    BODY_FORMAT_GMAIL_PDF,
+    build_gmail_print_document,
+    build_original_email_document,
+    body_format_needs_original_html,
+    body_format_needs_pdf,
+    plain_text_to_html_fragment,
+    sanitize_email_html,
 )
 
 
@@ -32,7 +41,7 @@ class DownloadMixin:
             return
 
         if not self.download_body.get() and not self.download_attachments.get():
-            messagebox.showwarning("Atencion", "Debes marcar al menos una opcion: Cuerpo (PDF) o Adjuntos.")
+            messagebox.showwarning("Atencion", "Debes marcar al menos una opcion: Cuerpo o Adjuntos.")
             return
 
         items_data = [self.tree.item(item, "values") for item in selected_items]
@@ -47,15 +56,29 @@ class DownloadMixin:
 
         threading.Thread(target=self.download_emails, args=(items_data,), daemon=True).start()
 
-    def convert_html_to_pdf(self, page, source_html, output_filename):
-        page.set_content(source_html, wait_until="networkidle", timeout=15000)
-        page.pdf(path=output_filename, format="Letter",
-                 margin={"top": "15mm", "bottom": "15mm",
-                         "left": "10mm", "right": "10mm"})
-        gs = find_ghostscript()
-        if gs:
-            self._compress_single_pdf(output_filename, gs)
-        return True
+    def convert_html_to_pdf(self, worker, source_html, output_filename):
+        tmp_html = output_filename + ".tmp.html"
+        try:
+            with open(tmp_html, "w", encoding="utf-8") as f:
+                f.write(source_html)
+            cmd = json.dumps({"html_path": tmp_html, "pdf_path": output_filename})
+            worker.stdin.write(cmd + "\n")
+            worker.stdin.flush()
+            line = worker.stdout.readline()
+            if not line:
+                raise RuntimeError("PDF worker no responde")
+            result = json.loads(line)
+            if not result.get("ok"):
+                raise RuntimeError(result.get("error", "Error desconocido"))
+            gs = find_ghostscript()
+            if gs:
+                self._compress_single_pdf(output_filename, gs)
+            return True
+        finally:
+            try:
+                os.remove(tmp_html)
+            except OSError:
+                pass
 
     def _load_manifest(self):
         path = os.path.join(self.output_dir, "manifest.json")
@@ -72,44 +95,54 @@ class DownloadMixin:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
 
-    def _start_playwright(self):
+    def _start_pdf_worker(self):
         self.log("Iniciando motor de renderizado PDF...")
-        last_error = None
-        for attempt in range(3):
-            try:
-                pw = sync_playwright().start()
-                br = pw.chromium.launch(headless=True)
-                pg = br.new_page()
-                return pw, br, pg
-            except Exception as e:
-                last_error = e
-                debug_log.error(f"Playwright start attempt {attempt+1} failed: {e}", exc_info=True)
-                if attempt < 2:
-                    self.log(f"  [PLAYWRIGHT] Reintentando inicio ({attempt+2}/3)...")
-                    time.sleep(2)
-        self.log(f"  [ERROR] No se pudo iniciar Playwright: {last_error}")
-        raise last_error
+        py_exe = sys.executable
+        if py_exe.lower().endswith("pythonw.exe"):
+            py_exe = py_exe[:-len("pythonw.exe")] + "python.exe"
+        worker = subprocess.Popen(
+            [py_exe, os.path.join(APP_DIR, "pdf_worker.py")],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        line = worker.stdout.readline()
+        if not line:
+            stderr = worker.stderr.read()
+            debug_log.error(f"PDF worker failed to start: {stderr}")
+            raise RuntimeError(f"PDF worker no inicio: {stderr[:200]}")
+        result = json.loads(line)
+        if not result.get("ready"):
+            raise RuntimeError("PDF worker no envio señal ready")
+        return worker
 
-    def _restart_playwright(self, pw_ctx, br):
+    def _stop_pdf_worker(self, worker):
+        if not worker:
+            return
         try:
-            if br:
-                br.close()
+            worker.stdin.close()
+            worker.wait(timeout=10)
         except Exception:
-            pass
-        try:
-            if pw_ctx:
-                pw_ctx.stop()
-        except Exception:
-            pass
-        return self._start_playwright()
+            try:
+                worker.kill()
+            except Exception:
+                pass
+
+    def _restart_pdf_worker(self, worker):
+        self._stop_pdf_worker(worker)
+        return self._start_pdf_worker()
 
     def download_emails(self, items_data):
         want_body = self.download_body.get()
         want_attachments = self.download_attachments.get()
+        body_format = getattr(self, "get_body_download_mode", lambda: BODY_FORMAT_GMAIL_PDF)()
+        want_gmail_pdf = want_body and body_format_needs_pdf(body_format)
+        want_original_html = want_body and body_format_needs_original_html(body_format)
 
-        pw_context = None
-        browser = None
-        page = None
+        pdf_worker = None
 
         try:
             os.makedirs(self.output_dir, exist_ok=True)
@@ -127,11 +160,13 @@ class DownloadMixin:
             self.connect_imap()
             manifest = self._load_manifest()
 
-            if want_body and PLAYWRIGHT_AVAILABLE:
+            if want_gmail_pdf and PLAYWRIGHT_AVAILABLE:
                 try:
-                    pw_context, browser, page = self._start_playwright()
+                    pdf_worker = self._start_pdf_worker()
                 except Exception:
-                    self.log("[AVISO] Playwright no disponible, cuerpo se guardara como HTML.")
+                    self.log("[AVISO] No se pudo iniciar Playwright; PDF estilo Gmail se guardara como HTML.")
+            elif want_gmail_pdf:
+                self.log("[AVISO] Playwright no disponible; PDF estilo Gmail se guardara como HTML.")
 
             template = self.format_entry.get().strip()
             if not template:
@@ -153,6 +188,7 @@ class DownloadMixin:
                 mbox, real_eid = self._parse_eid(eid_str)
                 fecha = item[1]
                 remitente = item[2]
+                destinatario = item[3]
                 asunto = item[4]
 
                 # Cambiar buzon si es necesario (modo Todos)
@@ -236,6 +272,15 @@ class DownloadMixin:
                     ctype = part.get_content_type()
                     cdispo = str(part.get("Content-Disposition", ""))
 
+                    if want_body and ctype.startswith("image/"):
+                        content_id = part.get("Content-ID", "")
+                        if content_id:
+                            img_payload = part.get_payload(decode=True)
+                            if img_payload:
+                                cid = content_id.strip("<>")
+                                b64 = base64.b64encode(img_payload).decode("ascii")
+                                cid_map[cid] = f"data:{ctype};base64,{b64}"
+
                     if "attachment" in cdispo or part.get_filename():
                         if want_attachments:
                             fname = part.get_filename()
@@ -254,13 +299,6 @@ class DownloadMixin:
                     if not payload:
                         continue
 
-                    if want_body and ctype.startswith("image/"):
-                        content_id = part.get("Content-ID", "")
-                        if content_id:
-                            cid = content_id.strip("<>")
-                            b64 = base64.b64encode(payload).decode("ascii")
-                            cid_map[cid] = f"data:{ctype};base64,{b64}"
-
                     if ctype == "text/html" and not body_html:
                         body_html = payload.decode("utf-8", errors="ignore")
                     elif ctype == "text/plain" and not body_text:
@@ -273,54 +311,58 @@ class DownloadMixin:
                 saved_something = os.path.isdir(folder_path)
 
                 if want_body and (body_html or body_text):
-                    final_html = body_html or f"<pre>{html.escape(body_text)}</pre>"
-
-                    safe_remitente = html.escape(remitente)
-                    safe_asunto = html.escape(asunto)
-                    safe_fecha = html.escape(fecha)
-
-                    full_html = f"""<html>
-<head><meta charset="utf-8">
-<style>
-    body {{ font-family: Arial, sans-serif; padding: 20px; }}
-    .header {{ border-bottom: 2px solid #ccc; padding-bottom: 10px; margin-bottom: 20px; }}
-    .header p {{ margin: 2px 0; }}
-</style>
-</head>
-<body>
-    <div class="header">
-        <p><strong>De:</strong> {safe_remitente}</p>
-        <p><strong>Asunto:</strong> {safe_asunto}</p>
-        <p><strong>Fecha:</strong> {safe_fecha}</p>
-    </div>
-    <div>{final_html}</div>
-</body>
-</html>"""
-
+                    original_source = body_html or plain_text_to_html_fragment(body_text)
+                    gmail_fragment = (
+                        sanitize_email_html(body_html)
+                        if body_html else plain_text_to_html_fragment(body_text)
+                    )
+                    if not gmail_fragment and body_text:
+                        gmail_fragment = plain_text_to_html_fragment(body_text)
                     os.makedirs(folder_path, exist_ok=True)
+                    gmail_html = build_gmail_print_document(
+                        account_email=self.email_entry.get().strip(),
+                        subject=asunto,
+                        sender=remitente,
+                        recipient=decode_str(msg.get("To", "")) or destinatario,
+                        cc=decode_str(msg.get("Cc", "")),
+                        sent_at=fecha,
+                        body_fragment=gmail_fragment,
+                    )
+                    original_document = build_original_email_document(original_source)
+
+                    if want_original_html:
+                        original_html_path = os.path.join(folder_path, "Mensaje_Original.html")
+                        with open(original_html_path, "w", encoding="utf-8") as hf:
+                            hf.write(original_document)
+                        self.log("  HTML original guardado en Mensaje_Original.html")
 
                     pdf_ok = False
-                    if page:
-                        pdf_path = os.path.join(folder_path, "Mensaje_Legible.pdf")
+                    if want_gmail_pdf and pdf_worker:
+                        pdf_path = os.path.join(folder_path, "Mensaje_Gmail.pdf")
                         for pw_attempt in range(2):
                             try:
-                                if self.convert_html_to_pdf(page, full_html, pdf_path):
+                                if self.convert_html_to_pdf(pdf_worker, gmail_html, pdf_path):
                                     pdf_ok = True
                                     break
                             except Exception as pw_err:
                                 if pw_attempt == 0:
                                     self.log("  [PLAYWRIGHT] Reiniciando...")
-                                    pw_context, browser, page = self._restart_playwright(pw_context, browser)
+                                    try:
+                                        pdf_worker = self._restart_pdf_worker(pdf_worker)
+                                    except Exception:
+                                        pdf_worker = None
+                                        self.log(f"  [ERROR PDF] {pw_err}")
+                                        break
                                 else:
                                     self.log(f"  [ERROR PDF] {pw_err}")
 
                     if pdf_ok:
-                        self.log("  PDF guardado en Mensaje_Legible.pdf")
-                    else:
-                        html_path = os.path.join(folder_path, "Mensaje_Legible.html")
+                        self.log("  PDF Gmail guardado en Mensaje_Gmail.pdf")
+                    elif want_gmail_pdf:
+                        html_path = os.path.join(folder_path, "Mensaje_Gmail.html")
                         with open(html_path, "w", encoding="utf-8") as hf:
-                            hf.write(full_html)
-                        self.log("  Mensaje guardado como HTML")
+                            hf.write(gmail_html)
+                        self.log("  HTML Gmail guardado en Mensaje_Gmail.html")
 
                     saved_something = True
 
@@ -360,16 +402,7 @@ class DownloadMixin:
             self.log(f"Error critico durante descarga: {str(e)}")
             self.root.after(0, messagebox.showerror, "Error", f"Ocurrio un error:\n{str(e)}")
         finally:
-            if browser:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
-            if pw_context:
-                try:
-                    pw_context.stop()
-                except Exception:
-                    pass
+            self._stop_pdf_worker(pdf_worker)
             def _restore_ui():
                 self.btn_cancel.pack_forget()
                 self.btn_download.pack(side="left", padx=2)

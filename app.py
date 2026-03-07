@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 import threading
 import os
 import base64
@@ -10,6 +10,12 @@ from utils import (
     ensure_chromium_installed, PLAYWRIGHT_AVAILABLE, GMAIL_DAILY_LIMIT,
     debug_log
 )
+from email_rendering import (
+    BODY_FORMAT_GMAIL_PDF,
+    BODY_FORMAT_LABEL_VALUES,
+    body_format_label,
+    normalize_body_format,
+)
 from datepicker import DatePicker
 from imap_handler import IMAPMixin
 from download_handler import DownloadMixin
@@ -18,7 +24,7 @@ from download_handler import DownloadMixin
 class GmailDownloaderApp(IMAPMixin, DownloadMixin):
     def __init__(self, root):
         self.root = root
-        self.root.title("Gmail Downloader")
+        self.root.title("Email Downloader")
         self.root.geometry("1250x750")
         self.root.minsize(1050, 600)
 
@@ -28,6 +34,7 @@ class GmailDownloaderApp(IMAPMixin, DownloadMixin):
 
         self.download_body = tk.BooleanVar(value=True)
         self.download_attachments = tk.BooleanVar(value=True)
+        self.body_format_var = tk.StringVar(value=body_format_label(BODY_FORMAT_GMAIL_PDF))
         self.has_attachments_filter = tk.BooleanVar(value=False)
         self.size_cache = {}
         self.daily_bytes = load_daily_quota()
@@ -78,40 +85,65 @@ class GmailDownloaderApp(IMAPMixin, DownloadMixin):
             debug_log.info(message)
 
     def create_widgets(self):
-        # === HEADER BAR (credenciales inline) ===
-        header = tk.Frame(self.root, bg="#2c3e50", height=45)
+        # === HEADER BAR ===
+        header = tk.Frame(self.root, bg="#2c3e50")
         header.pack(fill="x")
-        header.pack_propagate(False)
 
-        tk.Label(header, text="Gmail Downloader", bg="#2c3e50", fg="white",
-                 font=("Segoe UI", 13, "bold")).pack(side="left", padx=15)
+        # Row 1: Title + Profile
+        h1 = tk.Frame(header, bg="#2c3e50")
+        h1.pack(fill="x", padx=10, pady=(6, 0))
 
-        tk.Label(header, text="Correo:", bg="#2c3e50", fg="#bdc3c7",
-                 font=("Segoe UI", 9)).pack(side="left", padx=(20, 3))
-        self.email_entry = ttk.Entry(header, width=24)
-        self.email_entry.pack(side="left", pady=8)
+        tk.Label(h1, text="Email Downloader", bg="#2c3e50", fg="white",
+                 font=("Segoe UI", 13, "bold")).pack(side="left", padx=(5, 0))
 
-        tk.Label(header, text="App Password:", bg="#2c3e50", fg="#bdc3c7",
-                 font=("Segoe UI", 9)).pack(side="left", padx=(12, 3))
-        self.pass_entry = ttk.Entry(header, width=20, show="*")
-        self.pass_entry.pack(side="left", pady=8)
+        tk.Label(h1, text="Perfil:", bg="#2c3e50", fg="#bdc3c7",
+                 font=("Segoe UI", 9)).pack(side="left", padx=(25, 3))
+        self.profile_var = tk.StringVar()
+        self.profile_combo = ttk.Combobox(h1, textvariable=self.profile_var,
+                                           width=22, state="readonly")
+        self.profile_combo.pack(side="left")
+        self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_change)
 
-        self._pass_help = tk.Label(header, text="(?)", bg="#2c3e50", fg="#f39c12",
+        ttk.Button(h1, text="Guardar", command=self._save_profile,
+                   width=8).pack(side="left", padx=(8, 2))
+        ttk.Button(h1, text="Eliminar", command=self._delete_profile,
+                   width=8).pack(side="left", padx=2)
+
+        # Row 2: Server + Credentials + Connect + Mailbox
+        h2 = tk.Frame(header, bg="#2c3e50")
+        h2.pack(fill="x", padx=10, pady=(3, 6))
+
+        tk.Label(h2, text="Servidor:", bg="#2c3e50", fg="#bdc3c7",
+                 font=("Segoe UI", 9)).pack(side="left")
+        self.server_entry = ttk.Entry(h2, width=22)
+        self.server_entry.insert(0, "imap.gmail.com")
+        self.server_entry.pack(side="left", padx=(3, 10))
+
+        tk.Label(h2, text="Correo:", bg="#2c3e50", fg="#bdc3c7",
+                 font=("Segoe UI", 9)).pack(side="left")
+        self.email_entry = ttk.Entry(h2, width=24)
+        self.email_entry.pack(side="left", padx=(3, 0))
+
+        tk.Label(h2, text="Password:", bg="#2c3e50", fg="#bdc3c7",
+                 font=("Segoe UI", 9)).pack(side="left", padx=(10, 3))
+        self.pass_entry = ttk.Entry(h2, width=20, show="*")
+        self.pass_entry.pack(side="left")
+
+        self._pass_help = tk.Label(h2, text="(?)", bg="#2c3e50", fg="#f39c12",
                                     font=("Segoe UI", 9, "bold"), cursor="hand2")
         self._pass_help.pack(side="left", padx=(2, 0))
-        self._pass_help.bind("<Button-1>", lambda e: self._show_app_password_help())
+        self._pass_help.bind("<Button-1>", lambda e: self._show_password_help())
 
-        self.btn_test = ttk.Button(header, text="Conectar", command=self.start_test_connection)
+        self.btn_test = ttk.Button(h2, text="Conectar", command=self.start_test_connection)
         self.btn_test.pack(side="left", padx=8)
 
-        # Buzon selector en el header
-        tk.Label(header, text="Buzon:", bg="#2c3e50", fg="#bdc3c7",
-                 font=("Segoe UI", 9)).pack(side="left", padx=(12, 3))
+        tk.Label(h2, text="Buzon:", bg="#2c3e50", fg="#bdc3c7",
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 3))
         self.mailbox_var = tk.StringVar(value="[Todos]")
-        self.mailbox_combo = ttk.Combobox(header, textvariable=self.mailbox_var,
+        self.mailbox_combo = ttk.Combobox(h2, textvariable=self.mailbox_var,
                                            width=16, state="readonly")
         self.mailbox_combo["values"] = ["[Todos]", "INBOX"]
-        self.mailbox_combo.pack(side="left", pady=8)
+        self.mailbox_combo.pack(side="left")
 
         # === RIBBON DE BUSQUEDA ===
         ribbon = tk.Frame(self.root, bg="#dfe6e9")
@@ -233,7 +265,7 @@ class GmailDownloaderApp(IMAPMixin, DownloadMixin):
         ttk.Button(frame_toolbar, text="Seleccionar todos", command=self.select_all).pack(side="left", padx=2)
         ttk.Button(frame_toolbar, text="Deseleccionar", command=self.deselect_all).pack(side="left", padx=2)
         self.selection_label = ttk.Label(frame_toolbar, text="0 de 0 seleccionados", background="#ecf0f1")
-        self.selection_label.pack(side="right", padx=5)
+        self.selection_label.pack(side="left", padx=5)
 
         # === TOOLBAR 2: descargar / comprimir ===
         frame_actions = tk.Frame(self.root, bg="#ecf0f1")
@@ -267,7 +299,21 @@ class GmailDownloaderApp(IMAPMixin, DownloadMixin):
         self.format_entry.insert(0, "{date}_{subject}")
         self.format_entry.pack(side="left")
 
-        ttk.Checkbutton(actions, text="PDF", variable=self.download_body).pack(side="left", padx=(10, 2))
+        ttk.Checkbutton(
+            actions,
+            text="Cuerpo",
+            variable=self.download_body,
+            command=self._toggle_body_format_state,
+        ).pack(side="left", padx=(10, 2))
+        ttk.Label(actions, text="Formato del cuerpo:", background="#ecf0f1").pack(side="left", padx=(6, 3))
+        self.body_format_combo = ttk.Combobox(
+            actions,
+            textvariable=self.body_format_var,
+            width=18,
+            state="readonly",
+            values=BODY_FORMAT_LABEL_VALUES,
+        )
+        self.body_format_combo.pack(side="left", padx=(0, 6))
         ttk.Checkbutton(actions, text="Adjuntos", variable=self.download_attachments).pack(side="left", padx=2)
 
         # Barra de progreso (oculta por defecto)
@@ -310,13 +356,37 @@ class GmailDownloaderApp(IMAPMixin, DownloadMixin):
         s = load_settings()
         if not s:
             return
-        if s.get("email"):
-            self.email_entry.insert(0, s["email"])
-        if s.get("password"):
-            try:
-                self.pass_entry.insert(0, base64.b64decode(s["password"]).decode("utf-8"))
-            except Exception:
-                pass
+        # Cargar perfiles
+        profiles = s.get("profiles", {})
+        if profiles:
+            self.profile_combo["values"] = list(profiles.keys())
+            active = s.get("active_profile", "")
+            if active and active in profiles:
+                self.profile_var.set(active)
+                p = profiles[active]
+                self.server_entry.delete(0, tk.END)
+                self.server_entry.insert(0, p.get("imap_server", "imap.gmail.com"))
+                self.imap_server = p.get("imap_server", "imap.gmail.com")
+                if p.get("email"):
+                    self.email_entry.insert(0, p["email"])
+                if p.get("password"):
+                    try:
+                        self.pass_entry.insert(0, base64.b64decode(p["password"]).decode("utf-8"))
+                    except Exception:
+                        pass
+        else:
+            # Backward compat: cargar email/password legacy
+            if s.get("imap_server"):
+                self.server_entry.delete(0, tk.END)
+                self.server_entry.insert(0, s["imap_server"])
+                self.imap_server = s["imap_server"]
+            if s.get("email"):
+                self.email_entry.insert(0, s["email"])
+            if s.get("password"):
+                try:
+                    self.pass_entry.insert(0, base64.b64decode(s["password"]).decode("utf-8"))
+                except Exception:
+                    pass
         for field, key in [(self.global_search_entry, "global_search"),
                            (self.sender_entry, "sender"),
                            (self.subject_entry, "subject"),
@@ -342,11 +412,19 @@ class GmailDownloaderApp(IMAPMixin, DownloadMixin):
             self.download_body.set(s["download_body"])
         if "download_attachments" in s:
             self.download_attachments.set(s["download_attachments"])
+        if "body_format" in s:
+            self.body_format_var.set(body_format_label(s["body_format"]))
         if "log_height" in s:
             self.log_text.config(height=max(2, min(20, s["log_height"])))
+        self._toggle_body_format_state()
 
     def _save_settings(self):
+        existing = load_settings()
+        profiles = existing.get("profiles", {})
         save_settings({
+            "profiles": profiles,
+            "active_profile": self.profile_var.get(),
+            "imap_server": self.server_entry.get().strip() or self.imap_server,
             "email": self.email_entry.get().strip(),
             "password": base64.b64encode(self.pass_entry.get().strip().encode("utf-8")).decode("ascii"),
             "global_search": self.global_search_entry.get().strip(),
@@ -362,6 +440,7 @@ class GmailDownloaderApp(IMAPMixin, DownloadMixin):
             "output_dir": self.output_dir,
             "download_body": self.download_body.get(),
             "download_attachments": self.download_attachments.get(),
+            "body_format": self.get_body_download_mode(),
             "log_height": int(self.log_text.cget("height")),
         })
 
@@ -372,6 +451,13 @@ class GmailDownloaderApp(IMAPMixin, DownloadMixin):
 
     def deselect_all(self):
         self.tree.selection_remove(self.tree.get_children())
+
+    def get_body_download_mode(self):
+        return normalize_body_format(self.body_format_var.get())
+
+    def _toggle_body_format_state(self):
+        state = "readonly" if self.download_body.get() else "disabled"
+        self.body_format_combo.config(state=state)
 
     def update_selection_count(self, event=None):
         total = len(self.tree.get_children())
@@ -394,20 +480,94 @@ class GmailDownloaderApp(IMAPMixin, DownloadMixin):
         os.makedirs(self.output_dir, exist_ok=True)
         os.startfile(self.output_dir)
 
-    def _show_app_password_help(self):
+    def _show_password_help(self):
         messagebox.showinfo(
-            "Como obtener App Password",
+            "Ayuda: Password",
+            "=== Gmail ===\n"
             "Gmail NO acepta tu contrasena normal.\n"
             "Necesitas un App Password (contrasena de aplicacion):\n\n"
             "1. Ve a: myaccount.google.com/apppasswords\n"
             "2. Inicia sesion con tu cuenta Google\n"
-            "3. Escribe un nombre (ej: 'Gmail Downloader')\n"
+            "3. Escribe un nombre (ej: 'Email Downloader')\n"
             "4. Haz clic en 'Crear'\n"
-            "5. Copia la contrasena de 16 letras generada\n"
-            "6. Pegala en el campo 'App Password' de esta app\n\n"
-            "REQUISITO: Tener verificacion en 2 pasos activada\n"
-            "en tu cuenta de Google."
+            "5. Copia la contrasena de 16 letras generada\n\n"
+            "REQUISITO: Verificacion en 2 pasos activada.\n\n"
+            "=== HostGator / cPanel ===\n"
+            "Usa la contrasena de tu cuenta de correo\n"
+            "(la misma que usas en Webmail).\n"
+            "Servidor: mail.tudominio.com\n\n"
+            "=== Outlook / Office 365 ===\n"
+            "Servidor: outlook.office365.com\n"
+            "Puede requerir App Password si tienes 2FA."
         )
+
+    # -------------------------------------------------------------------
+    # Perfiles
+    # -------------------------------------------------------------------
+    def _on_profile_change(self, event=None):
+        name = self.profile_var.get()
+        if not name:
+            return
+        settings = load_settings()
+        profile = settings.get("profiles", {}).get(name)
+        if not profile:
+            return
+        self.server_entry.delete(0, tk.END)
+        self.server_entry.insert(0, profile.get("imap_server", "imap.gmail.com"))
+        self.email_entry.delete(0, tk.END)
+        self.email_entry.insert(0, profile.get("email", ""))
+        self.pass_entry.delete(0, tk.END)
+        try:
+            pwd = base64.b64decode(profile.get("password", "")).decode("utf-8")
+            self.pass_entry.insert(0, pwd)
+        except Exception:
+            pass
+        self.imap_server = profile.get("imap_server", "imap.gmail.com")
+        # Cerrar conexiones previas al cambiar perfil
+        self._close_preview_conn()
+
+    def _save_profile(self):
+        server = self.server_entry.get().strip()
+        email_addr = self.email_entry.get().strip()
+        password = self.pass_entry.get().strip()
+        if not server or not email_addr:
+            messagebox.showwarning("Perfil", "Ingresa servidor y correo antes de guardar.")
+            return
+        name = simpledialog.askstring(
+            "Guardar Perfil", "Nombre del perfil:",
+            initialvalue=self.profile_var.get() or email_addr)
+        if not name:
+            return
+        settings = load_settings()
+        if "profiles" not in settings:
+            settings["profiles"] = {}
+        settings["profiles"][name] = {
+            "imap_server": server,
+            "email": email_addr,
+            "password": base64.b64encode(password.encode("utf-8")).decode("ascii")
+        }
+        settings["active_profile"] = name
+        save_settings(settings)
+        self.profile_combo["values"] = list(settings["profiles"].keys())
+        self.profile_var.set(name)
+        self.log(f"Perfil '{name}' guardado.")
+
+    def _delete_profile(self):
+        name = self.profile_var.get()
+        if not name:
+            messagebox.showinfo("Perfil", "Selecciona un perfil para eliminar.")
+            return
+        if not messagebox.askyesno("Eliminar Perfil", f"Eliminar perfil '{name}'?"):
+            return
+        settings = load_settings()
+        profiles = settings.get("profiles", {})
+        profiles.pop(name, None)
+        if settings.get("active_profile") == name:
+            settings["active_profile"] = ""
+        save_settings(settings)
+        self.profile_combo["values"] = list(profiles.keys())
+        self.profile_var.set("")
+        self.log(f"Perfil '{name}' eliminado.")
 
 
 if __name__ == "__main__":

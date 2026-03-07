@@ -57,9 +57,10 @@ class IMAPMixin:
         email_addr = self.email_entry.get().strip()
         pwd = self.pass_entry.get().strip()
         if not email_addr or not pwd:
-            raise ValueError("Falta el correo o el App Password.")
+            raise ValueError("Falta el correo o el password.")
 
-        self.log("Conectando a Gmail...")
+        self.imap_server = self.server_entry.get().strip() or "imap.gmail.com"
+        self.log(f"Conectando a {self.imap_server}...")
         self.mail_conn = imaplib.IMAP4_SSL(self.imap_server, timeout=120)
         self.mail_conn.login(email_addr, pwd)
 
@@ -104,10 +105,11 @@ class IMAPMixin:
             email_addr = self.email_entry.get().strip()
             pwd = self.pass_entry.get().strip()
             if not email_addr or not pwd:
-                self.log("[ERROR] Falta el correo o el App Password.")
+                self.log("[ERROR] Falta el correo o el password.")
                 return
 
-            self.log("Probando conexion...")
+            self.imap_server = self.server_entry.get().strip() or "imap.gmail.com"
+            self.log(f"Probando conexion a {self.imap_server}...")
             conn = imaplib.IMAP4_SSL(self.imap_server, timeout=30)
             conn.login(email_addr, pwd)
 
@@ -342,6 +344,7 @@ class IMAPMixin:
                 pwd = self.pass_entry.get().strip()
                 if not email_addr or not pwd:
                     return
+                self.imap_server = self.server_entry.get().strip() or "imap.gmail.com"
                 self._preview_conn = imaplib.IMAP4_SSL(self.imap_server, timeout=30)
                 self._preview_conn.login(email_addr, pwd)
                 self._preview_mailbox = None

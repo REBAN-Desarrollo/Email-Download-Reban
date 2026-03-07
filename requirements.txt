@@ -1,3 +1,4 @@
 xhtml2pdf>=0.2.11,<1.0
 playwright
 pypdf>=4.0,<5.0
+beautifulsoup4>=4.12,<5.0

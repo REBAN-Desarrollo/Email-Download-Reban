@@ -63,10 +63,9 @@ DAYS_ES = ["Lu","Ma","Mi","Ju","Vi","Sa","Do"]
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(APP_DIR, "browsers")
 
 try:
-    from playwright.sync_api import sync_playwright
+    import playwright
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
-    sync_playwright = None
     PLAYWRIGHT_AVAILABLE = False
 
 
